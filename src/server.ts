@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import { sequelize } from './config/database.js';
 
 dotenv.config();
 
@@ -17,6 +18,18 @@ app.get('/', (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 
-app.listen(PORT, () => {
-  console.log(`🚀 Servidor rodando na porta ${PORT}`);
-});
+async function startServer() {
+  try {
+    await sequelize.authenticate();
+
+    console.log('✅ Conexão com PostgreSQL realizada com sucesso!');
+
+    app.listen(PORT, () => {
+      console.log(`🚀 Servidor rodando na porta ${PORT}`);
+    });
+  } catch (error) {
+    console.error('❌ Erro ao conectar com PostgreSQL:', error);
+  }
+}
+
+startServer();

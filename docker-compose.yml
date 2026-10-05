@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:17
+    container_name: legio-mariae-postgres
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_DB: legio_mariae
+      POSTGRES_USER: legio_admin
+      POSTGRES_PASSWORD: legio_dev_password
+
+    ports:
+      - "5432:5432"
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/syslegiomariae_core_v2.sql:/docker-entrypoint-initdb.d/syslegiomariae_core_v2.sql
+
+volumes:
+  postgres_data:
