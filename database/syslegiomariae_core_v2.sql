@@ -1136,6 +1136,58 @@ JOIN legio.perfil_acesso pa
 
 COMMIT;
 
+
+CREATE TABLE legio.usuario_token_acao (
+    id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    usuario_id      BIGINT NOT NULL,
+
+    tipo            VARCHAR(40) NOT NULL,
+    token_hash      VARCHAR(255) NOT NULL,
+
+    expira_em       TIMESTAMPTZ NOT NULL,
+    utilizado_em    TIMESTAMPTZ,
+    revogado_em     TIMESTAMPTZ,
+
+    ip_solicitacao  INET,
+    user_agent      TEXT,
+
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT fk_usuario_token_acao_usuario
+        FOREIGN KEY (usuario_id)
+        REFERENCES legio.usuario(id)
+        ON DELETE CASCADE,
+
+    CONSTRAINT ck_usuario_token_acao_tipo
+        CHECK (tipo IN (
+            'CONFIRMAR_EMAIL',
+            'REDEFINIR_SENHA',
+            'ALTERAR_EMAIL',
+            'DESBLOQUEAR_CONTA',
+            'CONVITE'
+        ))
+);
+
+
+CREATE TABLE legio.usuario_refresh_token (
+	id uuid NOT NULL,
+	usuario_id int8 NOT NULL,
+	token_hash bpchar(64) NOT NULL,
+	expira_em timestamptz NOT NULL,
+	revogado_em timestamptz NULL,
+	ip inet NULL,
+	user_agent text NULL,
+	created_at timestamptz DEFAULT CURRENT_TIMESTAMP NOT NULL,
+	CONSTRAINT usuario_refresh_token_pkey PRIMARY KEY (id),
+	CONSTRAINT usuario_refresh_token_token_hash_key UNIQUE (token_hash)
+);
+CREATE INDEX ix_refresh_usuario_ativo ON legio.usuario_refresh_token USING btree (usuario_id, expira_em) WHERE (revogado_em IS NULL);
+
+
+-- legio.usuario_refresh_token chaves estrangeiras
+
+ALTER TABLE legio.usuario_refresh_token ADD CONSTRAINT fk_refresh_usuario FOREIGN KEY (usuario_id) REFERENCES legio.usuario(id) ON DELETE CASCADE;
+
 -- ============================================================
 -- EXEMPLOS DE USO (NÃO EXECUTADOS AUTOMATICAMENTE)
 -- ============================================================
