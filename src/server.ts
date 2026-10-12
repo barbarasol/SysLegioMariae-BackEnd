@@ -6,6 +6,7 @@ import authRoutes from './routes/auth.routes.js';
 import {
   errorMiddleware
 } from './middlewares/error.middleware.js';
+import usuarioRoutes from './routes/usuario.routes.js';
 
 dotenv.config();
 
@@ -34,6 +35,11 @@ app.use(
   '/api/auth',
   authRoutes
 );
+
+app.use(
+  '/api/usuarios',
+  usuarioRoutes
+)
 
 app.use(
   errorMiddleware
