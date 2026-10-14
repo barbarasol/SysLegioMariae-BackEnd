@@ -3,11 +3,18 @@ import {
 } from 'express';
 
 import {
+  adicionarAcessoUnidade,
+  alterarAcessoUnidade,
   atualizar,
+  cadastroPublico,
   criar,
   excluir,
   listar,
-  listarPerfisGlobais
+  listarAcessosUnidade,
+  listarPerfisGlobais,
+  listarPerfisUnidade,
+  listarUnidadesDisponiveis,
+  removerAcessoUnidade
 } from '../controllers/usuario.controller.js';
 
 import {
@@ -17,10 +24,56 @@ import {
 const router =
   Router();
 
+/*
+ * Cadastro público:
+ * pessoa + usuário PENDENTE_EMAIL,
+ * sem perfil global e sem perfil de unidade.
+ */
+router.post(
+  '/cadastro',
+  cadastroPublico
+);
+
 router.get(
   '/perfis-globais',
   authMiddleware,
   listarPerfisGlobais
+);
+
+router.get(
+  '/perfis-unidade',
+  authMiddleware,
+  listarPerfisUnidade
+);
+
+router.get(
+  '/unidades-disponiveis',
+  authMiddleware,
+  listarUnidadesDisponiveis
+);
+
+router.get(
+  '/:id/acessos-unidade',
+  authMiddleware,
+  listarAcessosUnidade
+);
+
+router.post(
+  '/:id/acessos-unidade',
+  authMiddleware,
+  adicionarAcessoUnidade
+);
+
+router.put(
+  '/:id/acessos-unidade/:unidadeId/:perfilCodigo',
+  authMiddleware,
+  alterarAcessoUnidade
+);
+
+router.delete(
+  '/:id/acessos-unidade/:unidadeId/:perfilCodigo',
+  authMiddleware,
+  removerAcessoUnidade
 );
 
 router.get(
