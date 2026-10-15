@@ -138,6 +138,273 @@ export async function listarPerfisGlobais(
   }
 }
 
+
+function obterParametroCodigo(
+  valor: unknown,
+  campo: string
+): string {
+
+  const codigo =
+    typeof valor === 'string'
+      ? valor
+          .trim()
+          .toUpperCase()
+      : '';
+
+  if (
+    !codigo ||
+    !/^[A-Z0-9_]+$/.test(
+      codigo
+    )
+  ) {
+    throw new HttpError(
+      400,
+      `${campo} inválido.`
+    );
+  }
+
+  return codigo;
+}
+
+function obterParametroIdNumerico(
+  valor: unknown,
+  campo: string
+): string {
+
+  const id =
+    typeof valor === 'string'
+      ? valor.trim()
+      : '';
+
+  if (
+    !id ||
+    !/^\d+$/.test(id)
+  ) {
+    throw new HttpError(
+      400,
+      `${campo} inválido.`
+    );
+  }
+
+  return id;
+}
+
+export async function listarPerfisUnidade(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    exigirAutenticacao(
+      req
+    );
+
+    const perfis =
+      await usuarioService
+        .listarPerfisUnidade();
+
+    res.status(200).json({
+      perfis
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function listarUnidadesDisponiveis(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    exigirAutenticacao(
+      req
+    );
+
+    const unidades =
+      await usuarioService
+        .listarUnidadesDisponiveis();
+
+    res.status(200).json({
+      unidades
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function listarAcessosUnidade(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    exigirAutenticacao(
+      req
+    );
+
+    const usuarioId =
+      obterIdParametro(
+        req.params.id
+      );
+
+    const acessos =
+      await usuarioService
+        .listarAcessosUnidade(
+          usuarioId
+        );
+
+    res.status(200).json({
+      acessos
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function adicionarAcessoUnidade(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const usuarioAutenticadoId =
+      exigirAutenticacao(
+        req
+      );
+
+    const usuarioId =
+      obterIdParametro(
+        req.params.id
+      );
+
+    const {
+      unidadeId,
+      perfilCodigo,
+      observacao
+    } = req.body ?? {};
+
+    const acesso =
+      await usuarioService
+        .adicionarAcessoUnidade(
+          usuarioId,
+          {
+            unidadeId,
+            perfilCodigo,
+            observacao
+          },
+          usuarioAutenticadoId
+        );
+
+    res.status(201).json({
+      acesso
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function alterarAcessoUnidade(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const usuarioAutenticadoId =
+      exigirAutenticacao(
+        req
+      );
+
+    const usuarioId =
+      obterIdParametro(
+        req.params.id
+      );
+
+    const unidadeIdAtual =
+      obterParametroIdNumerico(
+        req.params.unidadeId,
+        'Identificador da unidade'
+      );
+
+    const perfilCodigoAtual =
+      obterParametroCodigo(
+        req.params.perfilCodigo,
+        'Perfil da unidade'
+      );
+
+    const {
+      unidadeId,
+      perfilCodigo,
+      observacao
+    } = req.body ?? {};
+
+    const acesso =
+      await usuarioService
+        .alterarAcessoUnidade(
+          usuarioId,
+          unidadeIdAtual,
+          perfilCodigoAtual,
+          {
+            unidadeId,
+            perfilCodigo,
+            observacao
+          },
+          usuarioAutenticadoId
+        );
+
+    res.status(200).json({
+      acesso
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
+export async function removerAcessoUnidade(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const usuarioAutenticadoId =
+      exigirAutenticacao(
+        req
+      );
+
+    const usuarioId =
+      obterIdParametro(
+        req.params.id
+      );
+
+    const unidadeId =
+      obterParametroIdNumerico(
+        req.params.unidadeId,
+        'Identificador da unidade'
+      );
+
+    const perfilCodigo =
+      obterParametroCodigo(
+        req.params.perfilCodigo,
+        'Perfil da unidade'
+      );
+
+    await usuarioService
+      .removerAcessoUnidade(
+        usuarioId,
+        unidadeId,
+        perfilCodigo,
+        usuarioAutenticadoId
+      );
+
+    res.status(200).json({
+      message:
+        'Acesso à unidade removido com sucesso.'
+    });
+  } catch (error) {
+    next(error);
+  }
+}
+
 export async function listar(
   req: AuthenticatedRequest,
   res: Response,
@@ -292,6 +559,39 @@ export async function excluir(
   }
 }
 
+export async function cadastroPublico(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const {
+      nome,
+      email,
+      senha,
+      nomePreferido,
+      cpf,
+      celular
+    } = req.body ?? {};
+
+    const resultado =
+      await usuarioService.criar({
+        nome,
+        email,
+        senha,
+        nomePreferido,
+        cpf,
+        celular
+      });
+
+    res.status(201).json(
+      resultado
+    );
+  } catch (error) {
+    next(error);
+  }
+}
+
 export async function criar(
   req: AuthenticatedRequest,
   res: Response,
@@ -308,8 +608,7 @@ export async function criar(
       senha,
       nomePreferido,
       cpf,
-      celular,
-      perfilCodigo
+      celular
     } = req.body ?? {};
 
     const resultado =
@@ -319,8 +618,7 @@ export async function criar(
         senha,
         nomePreferido,
         cpf,
-        celular,
-        perfilCodigo
+        celular
       });
 
     res.status(201).json(
