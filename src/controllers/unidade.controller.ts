@@ -261,8 +261,7 @@ export async function buscarCodigosPostais(
   try {
     const resultados = await unidadeService.buscarCodigosPostais(
       req.query.paisId,
-      req.query.codigoPostal,
-      req.query.municipioId
+      req.query.codigoPostal
     );
 
     res.json({
@@ -270,32 +269,6 @@ export async function buscarCodigosPostais(
       quantidade: resultados.length,
       resultados
     });
-  } catch (error) {
-    next(error);
-  }
-}
-
-export async function criarCodigoPostal(
-  req: AuthenticatedRequest,
-  res: Response,
-  next: NextFunction
-): Promise<void> {
-  try {
-    const usuarioId = exigirUsuarioId(req);
-
-    const resultado = await unidadeService.criarCodigoPostal({
-      paisId: req.body?.paisId,
-      municipioId: req.body?.municipioId,
-      subdivisaoLocalId: req.body?.subdivisaoLocalId,
-      codigoPostal: req.body?.codigoPostal,
-      tipoLogradouro: req.body?.tipoLogradouro,
-      logradouro: req.body?.logradouro,
-      bairro: req.body?.bairro,
-      localidade: req.body?.localidade,
-      usuarioId
-    });
-
-    res.status(201).json(resultado);
   } catch (error) {
     next(error);
   }
@@ -331,7 +304,6 @@ export async function criarIgreja(
       padre,
       municipioId,
       subdivisaoLocalId,
-      codigoPostalId,
       codigoPostal,
       tipoLogradouro,
       logradouro,
@@ -351,7 +323,6 @@ export async function criarIgreja(
       padre,
       municipioId,
       subdivisaoLocalId,
-      codigoPostalId,
       codigoPostal,
       tipoLogradouro,
       logradouro,

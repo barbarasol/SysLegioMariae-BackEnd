@@ -6,7 +6,6 @@ import {
   listarEstrutura,
   excluir,
   atualizar,
-  criarCodigoPostal,
   criarIgreja,
   criarMunicipio,
   criarSubdivisaoLocal,
@@ -44,7 +43,6 @@ router.get('/subdivisoes-locais', listarSubdivisoesLocais);
 router.post('/subdivisoes-locais', criarSubdivisaoLocal);
 
 router.get('/codigos-postais', buscarCodigosPostais);
-router.post('/codigos-postais', criarCodigoPostal);
 
 router.get('/igrejas', listarIgrejas);
 router.post('/igrejas', criarIgreja);
