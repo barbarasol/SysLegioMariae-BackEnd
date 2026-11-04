@@ -2,6 +2,26 @@ import { QueryTypes, Transaction } from 'sequelize';
 import { sequelize } from '../config/database.js';
 import { HttpError } from '../utils/http-error.js';
 
+/** Data de Elevação: validação no servidor, incluindo ano bissexto. */
+function normalizarDataElevacao(tipoCodigo: string, valor: unknown): string | null {
+  const relevante = ['COMITIUM', 'COMITIA', 'REGIA', 'SENATUS'].includes(
+    String(tipoCodigo ?? '').trim().toUpperCase()
+  );
+  if (!relevante) return null;
+  const data = String(valor ?? '').trim();
+  if (!data) throw new HttpError(400, 'Informe a Data de Elevação da unidade.');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(data)) {
+    throw new HttpError(400, 'Data de Elevação deve estar em AAAA-MM-DD.');
+  }
+  const [ano, mes, dia] = data.split('-').map(Number);
+  const d = new Date(Date.UTC(ano, mes - 1, dia));
+  if (d.getUTCFullYear() !== ano || d.getUTCMonth() + 1 !== mes || d.getUTCDate() !== dia) {
+    throw new HttpError(400, 'Data de Elevação inválida.');
+  }
+  return data;
+}
+
+
 type TipoUnidadeRow = {
   id: number;
   codigo: string;
@@ -132,6 +152,7 @@ export type CriarUnidadeInput = {
   municipioId: string;
   igrejaId: string;
   dataConstituicao?: string | null;
+  dataElevacao?: string | null;
   diaReuniaoId?: string | null;
   horarioInicioReuniao?: string | null;
   horarioFimReuniao?: string | null;
@@ -232,6 +253,7 @@ export type UnidadeDetalhe = {
   subdivisaoLocalId: string | null;
   codigoPostal: string | null;
   dataConstituicao: string | null;
+  dataElevacao: string | null;
   diaReuniaoId: string | null;
   horarioInicioReuniao: string | null;
   horarioFimReuniao: string | null;
@@ -2224,6 +2246,7 @@ export async function criar(
   const dataConstituicao = normalizarTextoOpcional(
     input.dataConstituicao
   );
+  const dataElevacao = normalizarDataElevacao(tipoCodigo, input.dataElevacao);
   const diaReuniaoId = normalizarTextoOpcional(
     input.diaReuniaoId
   );
@@ -2306,6 +2329,7 @@ export async function criar(
           estado_regiao,
           pais_codigo,
           data_constituicao,
+          data_elevacao,
           dia_reuniao,
           horario_inicio_reuniao,
           horario_fim_reuniao,
@@ -2337,6 +2361,7 @@ export async function criar(
           :estadoRegiao,
           :paisCodigo,
           CAST(:dataConstituicao AS date),
+          CAST(:dataElevacao AS date),
           CAST(:diaReuniaoId AS integer),
           CAST(:horarioInicioReuniao AS time),
           CAST(:horarioFimReuniao AS time),
@@ -2375,6 +2400,7 @@ export async function criar(
           estadoRegiao: localizacao.uf_nome,
           paisCodigo: codigoPaisLegado(localizacao.pais_sigla),
           dataConstituicao,
+          dataElevacao,
           diaReuniaoId,
           horarioInicioReuniao,
           horarioFimReuniao,
@@ -2507,6 +2533,7 @@ export async function obterPorId(
     subdivisao_local_id: string | null;
     codigo_postal: string | null;
     data_constituicao: string | null;
+    data_elevacao: string | null;
     dia_reuniao: string | null;
     horario_inicio_reuniao: string | null;
     horario_fim_reuniao: string | null;
@@ -2533,6 +2560,7 @@ export async function obterPorId(
         i.subdivisao_local_id::text,
         COALESCE(i.codigo_postal, ul.cep) AS codigo_postal,
         ul.data_constituicao::text,
+        ul.data_elevacao::text,
         ul.dia_reuniao::text,
         ul.horario_inicio_reuniao::text,
         ul.horario_fim_reuniao::text,
@@ -2583,6 +2611,7 @@ export async function obterPorId(
     subdivisaoLocalId: item.subdivisao_local_id,
     codigoPostal: item.codigo_postal,
     dataConstituicao: item.data_constituicao,
+    dataElevacao: item.data_elevacao,
     diaReuniaoId: item.dia_reuniao,
     horarioInicioReuniao: item.horario_inicio_reuniao?.slice(0, 5) ?? null,
     horarioFimReuniao: item.horario_fim_reuniao?.slice(0, 5) ?? null,
@@ -2622,6 +2651,7 @@ export async function atualizar(
   const telefone = normalizarTextoOpcional(input.telefone);
   const site = normalizarTextoOpcional(input.site);
   const dataConstituicao = normalizarTextoOpcional(input.dataConstituicao);
+  const dataElevacao = normalizarDataElevacao(tipoCodigo, input.dataElevacao);
   const diaReuniaoId = normalizarTextoOpcional(input.diaReuniaoId);
   const horarioInicioReuniao = normalizarHoraOpcional(
     input.horarioInicioReuniao,
@@ -2704,6 +2734,7 @@ export async function atualizar(
           estado_regiao = :estadoRegiao,
           pais_codigo = :paisCodigo,
           data_constituicao = CAST(:dataConstituicao AS date),
+          data_elevacao = CAST(:dataElevacao AS date),
           dia_reuniao = CAST(:diaReuniaoId AS integer),
           horario_inicio_reuniao = CAST(:horarioInicioReuniao AS time),
           horario_fim_reuniao = CAST(:horarioFimReuniao AS time),
@@ -2741,6 +2772,7 @@ export async function atualizar(
           estadoRegiao: localizacao.uf_nome,
           paisCodigo: codigoPaisLegado(localizacao.pais_sigla),
           dataConstituicao,
+          dataElevacao,
           diaReuniaoId,
           horarioInicioReuniao,
           horarioFimReuniao,
