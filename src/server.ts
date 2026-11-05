@@ -10,6 +10,8 @@ import usuarioRoutes from './routes/usuario.routes.js';
 import unidadeRoutes from './routes/unidade.routes.js';
 import solicitacaoRoutes from './routes/solicitacao.routes.js';
 import membroRoutes from './routes/membro.routes.js';
+import oficialRoutes from './routes/oficial.routes.js';
+import solicitacaoOficialRoutes from './routes/solicitacao-oficial.routes.js';
 
 dotenv.config();
 
@@ -58,6 +60,16 @@ app.use(
   '/api/membros',
   membroRoutes
 )
+
+app.use(
+  '/api/oficiais',
+  oficialRoutes
+);
+
+app.use(
+  '/api/solicitacoes-oficiais', 
+  solicitacaoOficialRoutes
+);
 
 app.use(
   errorMiddleware
