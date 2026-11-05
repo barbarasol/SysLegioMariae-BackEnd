@@ -2,6 +2,26 @@ import { QueryTypes, Transaction } from 'sequelize';
 import { sequelize } from '../config/database.js';
 import { HttpError } from '../utils/http-error.js';
 
+/** Data de Elevação: validação no servidor, incluindo ano bissexto. */
+function normalizarDataElevacao(tipoCodigo: string, valor: unknown): string | null {
+  const relevante = ['COMITIUM', 'COMITIA', 'REGIA', 'SENATUS'].includes(
+    String(tipoCodigo ?? '').trim().toUpperCase()
+  );
+  if (!relevante) return null;
+  const data = String(valor ?? '').trim();
+  if (!data) throw new HttpError(400, 'Informe a Data de Elevação da unidade.');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(data)) {
+    throw new HttpError(400, 'Data de Elevação deve estar em AAAA-MM-DD.');
+  }
+  const [ano, mes, dia] = data.split('-').map(Number);
+  const d = new Date(Date.UTC(ano, mes - 1, dia));
+  if (d.getUTCFullYear() !== ano || d.getUTCMonth() + 1 !== mes || d.getUTCDate() !== dia) {
+    throw new HttpError(400, 'Data de Elevação inválida.');
+  }
+  return data;
+}
+
+
 type TipoUnidadeRow = {
   id: number;
   codigo: string;
@@ -63,7 +83,6 @@ type IgrejaRow = {
   nome: string;
   padre: string | null;
   status: string;
-  codigo_postal_id: string | null;
   subdivisao_local_id: string | null;
   codigo_postal?: string | null;
   logradouro?: string | null;
@@ -72,26 +91,46 @@ type IgrejaRow = {
   bairro?: string | null;
 };
 
-type CodigoPostalRow = {
-  id: string;
-  pais_id: string;
-  uf_id: string | null;
-  municipio_id: string | null;
-  subdivisao_local_id: string | null;
-  codigo_postal: string;
-  tipo_logradouro: string | null;
-  logradouro: string | null;
+
+type CepBrasilExterno = {
+  cep: string;
+  uf: string;
+  cidade: string;
   bairro: string | null;
-  localidade: string | null;
-  fonte: string | null;
-  municipio_nome: string | null;
-  uf_nome: string | null;
-  uf_sigla: string | null;
-  subdivisao_local_nome: string | null;
+  logradouro: string | null;
+  codigoIbge: string | null;
+  fonte: 'BRASILAPI' | 'VIACEP';
+};
+
+type BrasilApiCepResponse = {
+  cep?: string;
+  state?: string;
+  city?: string;
+  neighborhood?: string | null;
+  street?: string | null;
+  service?: string;
+  ibge?: {
+    city?: string | number | null;
+    state?: string | number | null;
+  } | null;
+};
+
+type ViaCepResponse = {
+  cep?: string;
+  logradouro?: string | null;
+  complemento?: string | null;
+  bairro?: string | null;
+  localidade?: string;
+  uf?: string;
+  ibge?: string | null;
+  erro?: boolean | string;
+};
+
+type CodigoPostalSubdivisaoRow = {
+  subdivisao_local_id: string;
+  subdivisao_local_nome: string;
   subdivisao_local_tipo: string | null;
   subdivisao_local_codigo: string | null;
-  pais_nome: string;
-  pais_sigla: string | null;
 };
 
 type UnidadeCriadaRow = {
@@ -113,6 +152,7 @@ export type CriarUnidadeInput = {
   municipioId: string;
   igrejaId: string;
   dataConstituicao?: string | null;
+  dataElevacao?: string | null;
   diaReuniaoId?: string | null;
   horarioInicioReuniao?: string | null;
   horarioFimReuniao?: string | null;
@@ -127,7 +167,6 @@ export type CriarIgrejaInput = {
   padre?: string | null;
   municipioId: string;
   subdivisaoLocalId?: string | null;
-  codigoPostalId?: string | null;
   codigoPostal?: string | null;
   tipoLogradouro?: string | null;
   logradouro?: string | null;
@@ -163,17 +202,6 @@ export type CriarSubdivisaoLocalInput = {
   usuarioId: string;
 };
 
-export type CriarCodigoPostalInput = {
-  paisId: unknown;
-  municipioId: unknown;
-  subdivisaoLocalId?: unknown;
-  codigoPostal: unknown;
-  tipoLogradouro?: unknown;
-  logradouro?: unknown;
-  bairro?: unknown;
-  localidade?: unknown;
-  usuarioId: string;
-};
 
 export type UnidadeCriada = {
   id: string;
@@ -223,9 +251,9 @@ export type UnidadeDetalhe = {
   paisId: string;
   ufId: string;
   subdivisaoLocalId: string | null;
-  codigoPostalId: string | null;
   codigoPostal: string | null;
   dataConstituicao: string | null;
+  dataElevacao: string | null;
   diaReuniaoId: string | null;
   horarioInicioReuniao: string | null;
   horarioFimReuniao: string | null;
@@ -294,7 +322,6 @@ export type IgrejaOpcao = {
   nome: string;
   padre: string | null;
   status: string;
-  codigoPostalId: string | null;
   subdivisaoLocalId: string | null;
   codigoPostal: string | null;
   logradouro: string | null;
@@ -412,27 +439,57 @@ function validarCepBrasil(codigoPostal: string): void {
   }
 }
 
-function mapearCodigoPostal(row: CodigoPostalRow): CodigoPostalOpcao {
+function normalizarComparacao(valor: unknown): string {
+  return String(valor ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toUpperCase();
+}
+
+function ehMunicipioBrasilia(localizacao: LocalizacaoRow): boolean {
+  return (
+    normalizarComparacao(localizacao.uf_sigla) === 'DF' &&
+    normalizarComparacao(localizacao.municipio_nome) === 'BRASILIA'
+  );
+}
+
+function formatarCepBrasil(cep: string): string {
+  const numeros = String(cep ?? '').replace(/\D/g, '').slice(0, 8);
+  return numeros.length === 8
+    ? `${numeros.slice(0, 5)}-${numeros.slice(5)}`
+    : numeros;
+}
+
+function montarCodigoPostalOpcao(
+  endereco: CepBrasilExterno,
+  localizacao: LocalizacaoRow,
+  subdivisao?: CodigoPostalSubdivisaoRow | null
+): CodigoPostalOpcao {
+  const subdivisaoId = subdivisao?.subdivisao_local_id ?? null;
+
   return {
-    id: row.id,
-    paisId: row.pais_id,
-    ufId: row.uf_id,
-    municipioId: row.municipio_id,
-    subdivisaoLocalId: row.subdivisao_local_id,
-    codigoPostal: row.codigo_postal,
-    tipoLogradouro: row.tipo_logradouro,
-    logradouro: row.logradouro,
-    bairro: row.bairro,
-    localidade: row.localidade,
-    fonte: row.fonte,
-    municipioNome: row.municipio_nome,
-    ufNome: row.uf_nome,
-    ufSigla: row.uf_sigla,
-    subdivisaoLocalNome: row.subdivisao_local_nome,
-    subdivisaoLocalTipo: row.subdivisao_local_tipo,
-    subdivisaoLocalCodigo: row.subdivisao_local_codigo,
-    paisNome: row.pais_nome,
-    paisSigla: row.pais_sigla
+    // Identificador transitório somente para seleção no frontend.
+    // Não corresponde a uma linha de banco de dados.
+    id: `API:${endereco.cep}:${subdivisaoId ?? 'SEM_SUBDIVISAO'}`,
+    paisId: localizacao.pais_id,
+    ufId: localizacao.uf_id,
+    municipioId: localizacao.municipio_id,
+    subdivisaoLocalId: subdivisaoId,
+    codigoPostal: formatarCepBrasil(endereco.cep),
+    tipoLogradouro: null,
+    logradouro: endereco.logradouro,
+    bairro: endereco.bairro,
+    localidade: endereco.cidade,
+    fonte: endereco.fonte,
+    municipioNome: localizacao.municipio_nome,
+    ufNome: localizacao.uf_nome,
+    ufSigla: localizacao.uf_sigla,
+    subdivisaoLocalNome: subdivisao?.subdivisao_local_nome ?? null,
+    subdivisaoLocalTipo: subdivisao?.subdivisao_local_tipo ?? null,
+    subdivisaoLocalCodigo: subdivisao?.subdivisao_local_codigo ?? null,
+    paisNome: localizacao.pais_nome,
+    paisSigla: localizacao.pais_sigla
   };
 }
 
@@ -746,16 +803,13 @@ async function resolverIgreja(
         i.nome,
         i.padre,
         i.status,
-        i.codigo_postal_id::text,
         i.subdivisao_local_id::text,
-        cp.codigo_postal,
-        COALESCE(NULLIF(BTRIM(i.logradouro), ''), cp.logradouro) AS logradouro,
+        i.codigo_postal,
+        i.logradouro,
         i.numero_logradouro,
         i.complemento,
-        COALESCE(NULLIF(BTRIM(i.bairro), ''), cp.bairro) AS bairro
+        i.bairro
       FROM legio.igreja i
-      LEFT JOIN legio.codigo_postal cp
-        ON cp.id = i.codigo_postal_id
       WHERE i.id = CAST(:igrejaId AS bigint)
         AND i.id_municipio = CAST(:municipioId AS integer)
         AND i.status = 'ATIVA'
@@ -839,331 +893,440 @@ async function validarSuperior(
   }
 }
 
-async function buscarCodigosPostaisInterno(
-  paisId: string,
-  codigoPostal: string,
-  municipioId?: string | null,
-  transaction?: Transaction
-): Promise<CodigoPostalRow[]> {
-  return sequelize.query<CodigoPostalRow>(
-    `
-      SELECT
-        cp.id::text,
-        cp.pais_id::text,
-        COALESCE(cp.uf_id, m.id_uf)::text AS uf_id,
-        cp.municipio_id::text,
-        cp.subdivisao_local_id::text,
-        cp.codigo_postal,
-        cp.tipo_logradouro,
-        cp.logradouro,
-        cp.bairro,
-        cp.localidade,
-        cp.fonte,
-        m.nome AS municipio_nome,
-        u.nome AS uf_nome,
-        u.sigla AS uf_sigla,
-        sl.nome AS subdivisao_local_nome,
-        sl.tipo AS subdivisao_local_tipo,
-        sl.codigo AS subdivisao_local_codigo,
-        p.nome AS pais_nome,
-        p.sigla AS pais_sigla
-      FROM legio.codigo_postal cp
-      JOIN legio.pais p
-        ON p.id = cp.pais_id
-      LEFT JOIN legio.municipio m
-        ON m.id = cp.municipio_id
-      LEFT JOIN legio.uf u
-        ON u.id = COALESCE(cp.uf_id, m.id_uf)
-      LEFT JOIN legio.subdivisao_local sl
-        ON sl.id = cp.subdivisao_local_id
-      WHERE cp.pais_id = CAST(:paisId AS integer)
-        AND cp.ativo = TRUE
-        AND upper(regexp_replace(cp.codigo_postal, '[^A-Za-z0-9]', '', 'g'))
-            = upper(regexp_replace(:codigoPostal, '[^A-Za-z0-9]', '', 'g'))
-        AND (
-          CAST(:municipioId AS varchar) IS NULL
-          OR cp.municipio_id = CAST(:municipioId AS integer)
-        )
-      ORDER BY
-        CASE WHEN cp.subdivisao_local_id IS NULL THEN 1 ELSE 0 END,
-        cp.localidade NULLS LAST,
-        cp.logradouro NULLS LAST,
-        cp.bairro NULLS LAST,
-        cp.id
-      LIMIT 100
-    `,
-    {
-      replacements: {
-        paisId,
-        codigoPostal,
-        municipioId: municipioId ?? null
+const BRASIL_API_CEP_BASE_URL = (
+  process.env.BRASIL_API_CEP_BASE_URL ??
+  'https://brasilapi.com.br/api/cep/v1'
+).replace(/\/+$/, '');
+
+const VIA_CEP_BASE_URL = (
+  process.env.VIA_CEP_BASE_URL ??
+  'https://viacep.com.br/ws'
+).replace(/\/+$/, '');
+
+const CEP_API_TIMEOUT_MS = 4500;
+
+async function fetchJsonComTimeout<T>(
+  url: string,
+  timeoutMs = CEP_API_TIMEOUT_MS
+): Promise<{
+  status: number;
+  ok: boolean;
+  body: T | null;
+}> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': 'SysLegioMariae/1.0 CEP lookup'
       },
-      type: QueryTypes.SELECT,
-      transaction
+      signal: controller.signal
+    });
+
+    let body: T | null = null;
+
+    try {
+      body = await response.json() as T;
+    } catch {
+      body = null;
     }
+
+    return {
+      status: response.status,
+      ok: response.ok,
+      body
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function consultarBrasilApiCep(
+  cep: string
+): Promise<CepBrasilExterno | null> {
+  const resposta = await fetchJsonComTimeout<BrasilApiCepResponse>(
+    `${BRASIL_API_CEP_BASE_URL}/${encodeURIComponent(cep)}`
+  );
+
+  if (resposta.status === 404) {
+    return null;
+  }
+
+  if (!resposta.ok || !resposta.body) {
+    throw new Error(
+      `BrasilAPI indisponível para o CEP consultado (HTTP ${resposta.status}).`
+    );
+  }
+
+  const body = resposta.body;
+  const uf = String(body.state ?? '').trim().toUpperCase();
+  const cidade = String(body.city ?? '').trim();
+
+  if (!uf || !cidade) {
+    return null;
+  }
+
+  return {
+    cep,
+    uf,
+    cidade,
+    bairro: normalizarTextoOpcional(body.neighborhood),
+    logradouro: normalizarTextoOpcional(body.street),
+    codigoIbge: normalizarTextoOpcional(body.ibge?.city),
+    fonte: 'BRASILAPI'
+  };
+}
+
+async function consultarViaCep(
+  cep: string
+): Promise<CepBrasilExterno | null> {
+  const resposta = await fetchJsonComTimeout<ViaCepResponse>(
+    `${VIA_CEP_BASE_URL}/${encodeURIComponent(cep)}/json/`
+  );
+
+  if (resposta.status === 404) {
+    return null;
+  }
+
+  if (!resposta.ok || !resposta.body) {
+    throw new Error(
+      `ViaCEP indisponível para o CEP consultado (HTTP ${resposta.status}).`
+    );
+  }
+
+  const body = resposta.body;
+  const naoEncontrado =
+    body.erro === true ||
+    String(body.erro ?? '').toLowerCase() === 'true';
+
+  if (naoEncontrado) {
+    return null;
+  }
+
+  const uf = String(body.uf ?? '').trim().toUpperCase();
+  const cidade = String(body.localidade ?? '').trim();
+
+  if (!uf || !cidade) {
+    return null;
+  }
+
+  return {
+    cep,
+    uf,
+    cidade,
+    bairro: normalizarTextoOpcional(body.bairro),
+    logradouro: normalizarTextoOpcional(body.logradouro),
+    codigoIbge: normalizarTextoOpcional(body.ibge),
+    fonte: 'VIACEP'
+  };
+}
+
+async function consultarCepBrasilExterno(
+  cep: string
+): Promise<CepBrasilExterno> {
+  let brasilApiFalhou = false;
+  let viaCepFalhou = false;
+
+  try {
+    const brasilApi = await consultarBrasilApiCep(cep);
+
+    if (brasilApi) {
+      return brasilApi;
+    }
+  } catch {
+    brasilApiFalhou = true;
+  }
+
+  try {
+    const viaCep = await consultarViaCep(cep);
+
+    if (viaCep) {
+      return viaCep;
+    }
+  } catch {
+    viaCepFalhou = true;
+  }
+
+  if (brasilApiFalhou && viaCepFalhou) {
+    throw new HttpError(
+      503,
+      'Os serviços públicos de consulta de CEP estão temporariamente indisponíveis. Tente novamente.'
+    );
+  }
+
+  throw new HttpError(
+    404,
+    'CEP não encontrado nos serviços públicos consultados.'
   );
 }
 
-async function inserirCodigoPostalExterior(
-  input: {
-    paisId: string;
-    municipioId: string;
-    subdivisaoLocalId?: string | null;
-    codigoPostal: string;
-    tipoLogradouro?: string | null;
-    logradouro?: string | null;
-    bairro?: string | null;
-    localidade?: string | null;
-    usuarioId: string;
-  },
-  transaction: Transaction
-): Promise<CodigoPostalOpcao> {
-  const localizacao = await resolverLocalizacao(
-    input.municipioId,
-    transaction
-  );
+async function resolverLocalizacaoCepBrasil(
+  cep: CepBrasilExterno
+): Promise<LocalizacaoRow> {
+  const codigoIbge = String(cep.codigoIbge ?? '')
+    .replace(/\D/g, '')
+    .slice(0, 7);
 
-  if (localizacao.pais_id !== input.paisId) {
-    throw new HttpError(
-      400,
-      'O Município/Localidade não pertence ao país informado.'
+  if (codigoIbge) {
+    const porIbge = await sequelize.query<LocalizacaoRow>(
+      `
+        SELECT
+          m.id::text AS municipio_id,
+          m.nome AS municipio_nome,
+          u.id::text AS uf_id,
+          u.nome AS uf_nome,
+          u.sigla AS uf_sigla,
+          p.id::text AS pais_id,
+          p.nome AS pais_nome,
+          p.sigla AS pais_sigla
+        FROM legio.municipio m
+        JOIN legio.uf u
+          ON u.id = m.id_uf
+        JOIN legio.pais p
+          ON p.id = u.id_pais
+        WHERE p.sigla = 'BR'
+          AND m.codigo_ibge = CAST(:codigoIbge AS integer)
+        LIMIT 1
+      `,
+      {
+        replacements: { codigoIbge },
+        type: QueryTypes.SELECT
+      }
     );
-  }
 
-  if (ehBrasilSigla(localizacao.pais_sigla)) {
-    throw new HttpError(
-      400,
-      'Não é permitido cadastrar novo CEP brasileiro. Utilize um CEP já importado.'
-    );
-  }
-
-  if (input.subdivisaoLocalId) {
-    await resolverSubdivisaoLocal(
-      input.subdivisaoLocalId,
-      input.municipioId,
-      transaction
-    );
-  }
-
-  const existentes = await buscarCodigosPostaisInterno(
-    input.paisId,
-    input.codigoPostal,
-    input.municipioId,
-    transaction
-  );
-
-  const existente = existentes.find((item) => {
-    const atual = item.subdivisao_local_id ?? null;
-    const desejada = input.subdivisaoLocalId ?? null;
-    return atual === desejada;
-  }) ?? existentes[0];
-
-  if (existente) {
-    return mapearCodigoPostal(existente);
-  }
-
-  const linhas = await sequelize.query<CodigoPostalRow>(
-    `
-      INSERT INTO legio.codigo_postal
-      (
-        pais_id,
-        uf_id,
-        municipio_id,
-        subdivisao_local_id,
-        localidade,
-        codigo_postal,
-        tipo_logradouro,
-        logradouro,
-        bairro,
-        fonte,
-        origem_id,
-        ativo,
-        usu_inc_id,
-        usu_alt_id
-      )
-      VALUES
-      (
-        CAST(:paisId AS integer),
-        CAST(:ufId AS integer),
-        CAST(:municipioId AS integer),
-        CAST(:subdivisaoLocalId AS bigint),
-        :localidade,
-        :codigoPostal,
-        :tipoLogradouro,
-        :logradouro,
-        :bairro,
-        'CADASTRO_USUARIO',
-        NULL,
-        TRUE,
-        CAST(:usuarioId AS bigint),
-        CAST(:usuarioId AS bigint)
-      )
-      RETURNING
-        id::text,
-        pais_id::text,
-        uf_id::text,
-        municipio_id::text,
-        subdivisao_local_id::text,
-        codigo_postal,
-        tipo_logradouro,
-        logradouro,
-        bairro,
-        localidade,
-        fonte,
-        NULL::varchar AS municipio_nome,
-        NULL::varchar AS uf_nome,
-        NULL::varchar AS uf_sigla,
-        NULL::varchar AS subdivisao_local_nome,
-        NULL::varchar AS subdivisao_local_tipo,
-        NULL::varchar AS subdivisao_local_codigo,
-        NULL::varchar AS pais_nome,
-        NULL::varchar AS pais_sigla
-    `,
-    {
-      replacements: {
-        paisId: input.paisId,
-        ufId: localizacao.uf_id,
-        municipioId: input.municipioId,
-        subdivisaoLocalId: input.subdivisaoLocalId ?? null,
-        localidade: input.localidade ?? localizacao.municipio_nome,
-        codigoPostal: input.codigoPostal,
-        tipoLogradouro: input.tipoLogradouro ?? null,
-        logradouro: input.logradouro ?? null,
-        bairro: input.bairro ?? null,
-        usuarioId: input.usuarioId
-      },
-      type: QueryTypes.SELECT,
-      transaction
+    if (porIbge[0]) {
+      return porIbge[0];
     }
-  );
+  }
 
-  const id = linhas[0].id;
-
-  const recarregados = await sequelize.query<CodigoPostalRow>(
+  const porNome = await sequelize.query<LocalizacaoRow>(
     `
       SELECT
-        cp.id::text,
-        cp.pais_id::text,
-        COALESCE(cp.uf_id, m.id_uf)::text AS uf_id,
-        cp.municipio_id::text,
-        cp.subdivisao_local_id::text,
-        cp.codigo_postal,
-        cp.tipo_logradouro,
-        cp.logradouro,
-        cp.bairro,
-        cp.localidade,
-        cp.fonte,
+        m.id::text AS municipio_id,
         m.nome AS municipio_nome,
+        u.id::text AS uf_id,
         u.nome AS uf_nome,
         u.sigla AS uf_sigla,
-        sl.nome AS subdivisao_local_nome,
-        sl.tipo AS subdivisao_local_tipo,
-        sl.codigo AS subdivisao_local_codigo,
+        p.id::text AS pais_id,
         p.nome AS pais_nome,
         p.sigla AS pais_sigla
-      FROM legio.codigo_postal cp
-      JOIN legio.pais p ON p.id = cp.pais_id
-      LEFT JOIN legio.municipio m ON m.id = cp.municipio_id
-      LEFT JOIN legio.uf u ON u.id = COALESCE(cp.uf_id, m.id_uf)
-      LEFT JOIN legio.subdivisao_local sl
-        ON sl.id = cp.subdivisao_local_id
-      WHERE cp.id = CAST(:id AS bigint)
+      FROM legio.municipio m
+      JOIN legio.uf u
+        ON u.id = m.id_uf
+      JOIN legio.pais p
+        ON p.id = u.id_pais
+      WHERE p.sigla = 'BR'
+        AND upper(COALESCE(u.sigla, '')) = upper(:uf)
+        AND upper(btrim(m.nome)) = upper(btrim(:cidade))
       LIMIT 1
     `,
     {
-      replacements: { id },
+      replacements: {
+        uf: cep.uf,
+        cidade: cep.cidade
+      },
+      type: QueryTypes.SELECT
+    }
+  );
+
+  if (porNome[0]) {
+    return porNome[0];
+  }
+
+  throw new HttpError(
+    422,
+    `O CEP foi localizado, porém o Município/Localidade "${cep.cidade}/${cep.uf}" não existe na base local.`
+  );
+}
+
+async function listarSubdivisoesCepBrasilia(
+  codigoPostal: string,
+  municipioId: string,
+  transaction?: Transaction
+): Promise<CodigoPostalSubdivisaoRow[]> {
+  return sequelize.query<CodigoPostalSubdivisaoRow>(
+    `
+      SELECT
+        cps.subdivisao_local_id::text,
+        sl.nome AS subdivisao_local_nome,
+        sl.tipo AS subdivisao_local_tipo,
+        sl.codigo AS subdivisao_local_codigo
+      FROM legio.codigo_postal_subdivisao cps
+      JOIN legio.subdivisao_local sl
+        ON sl.id = cps.subdivisao_local_id
+       AND sl.ativo = TRUE
+      WHERE cps.ativo = TRUE
+        AND sl.municipio_id = CAST(:municipioId AS integer)
+        AND regexp_replace(cps.codigo_postal, '[^0-9]', '', 'g')
+          = regexp_replace(:codigoPostal, '[^0-9]', '', 'g')
+      ORDER BY sl.nome, sl.id
+    `,
+    {
+      replacements: {
+        codigoPostal,
+        municipioId
+      },
       type: QueryTypes.SELECT,
       transaction
     }
   );
-
-  return mapearCodigoPostal(recarregados[0]);
 }
 
-async function obterOuCriarCodigoPostal(
+async function consultarCepBrasilSomenteApi(
+  codigoPostal: string
+): Promise<CodigoPostalOpcao[]> {
+  const cepNumerico = codigoPostal.replace(/\D/g, '');
+  const endereco = await consultarCepBrasilExterno(cepNumerico);
+  const localizacao = await resolverLocalizacaoCepBrasil(endereco);
+
+  // A única consulta de CEP ao banco ocorre para Brasília/DF,
+  // exclusivamente para descobrir a Região Administrativa.
+  const subdivisoes = ehMunicipioBrasilia(localizacao)
+    ? await listarSubdivisoesCepBrasilia(
+        endereco.cep,
+        localizacao.municipio_id
+      )
+    : [];
+
+  if (subdivisoes.length === 0) {
+    return [
+      montarCodigoPostalOpcao(
+        endereco,
+        localizacao,
+        null
+      )
+    ];
+  }
+
+  return subdivisoes.map((subdivisao) =>
+    montarCodigoPostalOpcao(
+      endereco,
+      localizacao,
+      subdivisao
+    )
+  );
+}
+
+async function prepararEnderecoIgreja(
   input: {
-    codigoPostalId?: string | null;
     codigoPostal?: string | null;
     municipioId: string;
     subdivisaoLocalId?: string | null;
     localizacao: LocalizacaoRow;
-    tipoLogradouro?: string | null;
     logradouro?: string | null;
     bairro?: string | null;
     localidade?: string | null;
-    usuarioId: string;
-  },
-  transaction: Transaction
-): Promise<string | null> {
+  }
+): Promise<{
+  codigoPostal: string | null;
+  subdivisaoLocalId: string | null;
+  logradouro: string | null;
+  bairro: string | null;
+  localidade: string | null;
+}> {
   const codigoPostal = normalizarCodigoPostal(input.codigoPostal);
+  let subdivisaoLocalId = input.subdivisaoLocalId ?? null;
+  let logradouro = normalizarTextoOpcional(input.logradouro);
+  let bairro = normalizarTextoOpcional(input.bairro);
+  let localidade = normalizarTextoOpcional(input.localidade);
 
-  if (input.codigoPostalId) {
-    const codigoPostalId = normalizarId(
-      input.codigoPostalId,
-      'um CEP/Código Postal'
+  if (subdivisaoLocalId) {
+    await resolverSubdivisaoLocal(
+      subdivisaoLocalId,
+      input.municipioId
     );
+  }
 
-    const existentes = await sequelize.query<{ id: string }>(
-      `
-        SELECT id::text
-        FROM legio.codigo_postal
-        WHERE id = CAST(:codigoPostalId AS bigint)
-          AND pais_id = CAST(:paisId AS integer)
-          AND ativo = TRUE
-          AND (
-            municipio_id IS NULL
-            OR municipio_id = CAST(:municipioId AS integer)
-          )
-        LIMIT 1
-      `,
-      {
-        replacements: {
-          codigoPostalId,
-          paisId: input.localizacao.pais_id,
-          municipioId: input.municipioId
-        },
-        type: QueryTypes.SELECT,
-        transaction
-      }
-    );
-
-    if (existentes.length === 0) {
-      throw new HttpError(
-        400,
-        'O CEP/Código Postal selecionado não pertence à localização informada.'
-      );
-    }
-
-    return codigoPostalId;
+  // Exterior: o Código Postal é informação do endereço da Igreja e
+  // é armazenado diretamente em legio.igreja, sem tabela catálogo.
+  if (!ehBrasilSigla(input.localizacao.pais_sigla)) {
+    return {
+      codigoPostal,
+      subdivisaoLocalId,
+      logradouro,
+      bairro,
+      localidade: localidade ?? input.localizacao.municipio_nome
+    };
   }
 
   if (!codigoPostal) {
-    return null;
+    return {
+      codigoPostal: null,
+      subdivisaoLocalId,
+      logradouro,
+      bairro,
+      localidade: input.localizacao.municipio_nome
+    };
   }
 
-  if (ehBrasilSigla(input.localizacao.pais_sigla)) {
+  validarCepBrasil(codigoPostal);
+
+  const enderecoApi = await consultarCepBrasilExterno(
+    codigoPostal.replace(/\D/g, '')
+  );
+  const localizacaoApi = await resolverLocalizacaoCepBrasil(enderecoApi);
+
+  if (
+    localizacaoApi.pais_id !== input.localizacao.pais_id ||
+    localizacaoApi.uf_id !== input.localizacao.uf_id ||
+    localizacaoApi.municipio_id !== input.municipioId
+  ) {
     throw new HttpError(
       400,
-      'CEP brasileiro não encontrado/selecionado. No Brasil não é permitido cadastrar novo CEP neste fluxo.'
+      `O CEP informado pertence a ${localizacaoApi.municipio_nome}/${localizacaoApi.uf_sigla ?? localizacaoApi.uf_nome}, e não ao Município/Localidade selecionado.`
     );
   }
 
-  const codigo = await inserirCodigoPostalExterior(
-    {
-      paisId: input.localizacao.pais_id,
-      municipioId: input.municipioId,
-      subdivisaoLocalId: input.subdivisaoLocalId ?? null,
-      codigoPostal,
-      tipoLogradouro: normalizarTextoOpcional(input.tipoLogradouro),
-      logradouro: normalizarTextoOpcional(input.logradouro),
-      bairro: normalizarTextoOpcional(input.bairro),
-      localidade: normalizarTextoOpcional(input.localidade),
-      usuarioId: input.usuarioId
-    },
-    transaction
-  );
+  if (ehMunicipioBrasilia(localizacaoApi)) {
+    const subdivisoesMapeadas = await listarSubdivisoesCepBrasilia(
+      enderecoApi.cep,
+      input.municipioId
+    );
 
-  return codigo.id;
+    if (subdivisoesMapeadas.length === 1) {
+      const unica = subdivisoesMapeadas[0].subdivisao_local_id;
+
+      if (subdivisaoLocalId && subdivisaoLocalId !== unica) {
+        throw new HttpError(
+          400,
+          'A Região Administrativa selecionada não corresponde ao mapeamento desse CEP em Brasília.'
+        );
+      }
+
+      subdivisaoLocalId = unica;
+    } else if (subdivisoesMapeadas.length > 1) {
+      const idsPermitidos = new Set(
+        subdivisoesMapeadas.map((item) => item.subdivisao_local_id)
+      );
+
+      if (!subdivisaoLocalId) {
+        throw new HttpError(
+          400,
+          'Este CEP possui mais de uma Região Administrativa possível em Brasília. Selecione a Subdivisão Local correspondente ao endereço.'
+        );
+      }
+
+      if (!idsPermitidos.has(subdivisaoLocalId)) {
+        throw new HttpError(
+          400,
+          'A Região Administrativa selecionada não corresponde às opções mapeadas para esse CEP em Brasília.'
+        );
+      }
+    }
+    // Se o CEP de Brasília não estiver no mapeamento, preservamos a
+    // Subdivisão Local escolhida manualmente pelo usuário, quando houver.
+  }
+
+  return {
+    codigoPostal: formatarCepBrasil(enderecoApi.cep),
+    subdivisaoLocalId,
+    logradouro: enderecoApi.logradouro ?? logradouro,
+    bairro: enderecoApi.bairro ?? bairro,
+    localidade: enderecoApi.cidade
+  };
 }
 
 export async function listarTipos(): Promise<TipoUnidadeOpcao[]> {
@@ -1689,8 +1852,7 @@ export async function criarSubdivisaoLocal(
 
 export async function buscarCodigosPostais(
   paisIdValor: unknown,
-  codigoPostalValor: unknown,
-  municipioIdValor?: unknown
+  codigoPostalValor: unknown
 ): Promise<CodigoPostalOpcao[]> {
   const pais = await resolverPais(paisIdValor);
   const codigoPostal = normalizarCodigoPostal(codigoPostalValor);
@@ -1699,63 +1861,17 @@ export async function buscarCodigosPostais(
     throw new HttpError(400, 'Informe o CEP/Código Postal.');
   }
 
+  // Brasil: consulta sempre os serviços públicos. Não há cache em
+  // legio.codigo_postal e nenhum endereço de CEP é lido dessa tabela.
   if (ehBrasilSigla(pais.sigla)) {
     validarCepBrasil(codigoPostal);
+    return consultarCepBrasilSomenteApi(codigoPostal);
   }
 
-  const municipioId = normalizarTextoOpcional(municipioIdValor);
-
-  if (municipioId && !/^\d+$/.test(municipioId)) {
-    throw new HttpError(400, 'Município/Localidade inválido.');
-  }
-
-  const linhas = await buscarCodigosPostaisInterno(
-    pais.id,
-    codigoPostal,
-    municipioId
-  );
-
-  return linhas.map(mapearCodigoPostal);
-}
-
-export async function criarCodigoPostal(
-  input: CriarCodigoPostalInput
-): Promise<CodigoPostalOpcao> {
-  const paisId = normalizarId(input.paisId, 'um País');
-  const municipioId = normalizarId(
-    input.municipioId,
-    'um Município/Localidade'
-  );
-  const usuarioId = normalizarId(input.usuarioId, 'um usuário');
-  const codigoPostal = normalizarCodigoPostal(input.codigoPostal);
-
-  if (!codigoPostal) {
-    throw new HttpError(400, 'Informe o Código Postal.');
-  }
-
-  await bloquearInclusaoBrasil(
-    paisId,
-    'novo CEP/Código Postal'
-  );
-
-  return sequelize.transaction(async (transaction) => {
-    return inserirCodigoPostalExterior(
-      {
-        paisId,
-        municipioId,
-        subdivisaoLocalId: normalizarTextoOpcional(
-          input.subdivisaoLocalId
-        ),
-        codigoPostal,
-        tipoLogradouro: normalizarTextoOpcional(input.tipoLogradouro),
-        logradouro: normalizarTextoOpcional(input.logradouro),
-        bairro: normalizarTextoOpcional(input.bairro),
-        localidade: normalizarTextoOpcional(input.localidade),
-        usuarioId
-      },
-      transaction
-    );
-  });
+  // Para o exterior não mantemos catálogo de códigos postais.
+  // O código é informado no cadastro da Igreja/Paróquia/Sede e
+  // persistido diretamente nela.
+  return [];
 }
 
 export async function listarIgrejas(
@@ -1785,16 +1901,13 @@ export async function listarIgrejas(
         i.nome,
         i.padre,
         i.status,
-        i.codigo_postal_id::text,
         i.subdivisao_local_id::text,
-        cp.codigo_postal,
-        COALESCE(NULLIF(BTRIM(i.logradouro), ''), cp.logradouro) AS logradouro,
+        i.codigo_postal,
+        i.logradouro,
         i.numero_logradouro,
         i.complemento,
-        COALESCE(NULLIF(BTRIM(i.bairro), ''), cp.bairro) AS bairro
+        i.bairro
       FROM legio.igreja i
-      LEFT JOIN legio.codigo_postal cp
-        ON cp.id = i.codigo_postal_id
       WHERE i.id_municipio = CAST(:municipioId AS integer)
         AND i.status = 'ATIVA'
         AND (
@@ -1817,7 +1930,6 @@ export async function listarIgrejas(
     nome: item.nome,
     padre: item.padre,
     status: item.status,
-    codigoPostalId: item.codigo_postal_id,
     subdivisaoLocalId: item.subdivisao_local_id,
     codigoPostal: item.codigo_postal ?? null,
     logradouro: item.logradouro ?? null,
@@ -1837,14 +1949,13 @@ export async function criarIgreja(
     'um Município/Localidade'
   );
   const usuarioId = normalizarId(input.usuarioId, 'um usuário');
-  const subdivisaoLocalId = normalizarTextoOpcional(
+  const subdivisaoLocalIdInformada = normalizarTextoOpcional(
     input.subdivisaoLocalId
   );
 
-  const tipoLogradouro = normalizarTextoOpcional(input.tipoLogradouro);
-  const logradouro = normalizarTextoOpcional(input.logradouro);
-  const bairro = normalizarTextoOpcional(input.bairro);
-  const localidade = normalizarTextoOpcional(input.localidade);
+  const logradouroInformado = normalizarTextoOpcional(input.logradouro);
+  const bairroInformado = normalizarTextoOpcional(input.bairro);
+  const localidadeInformada = normalizarTextoOpcional(input.localidade);
   const numeroLogradouro = normalizarTextoOpcional(
     input.numeroLogradouro
   );
@@ -1859,20 +1970,21 @@ export async function criarIgreja(
     throw new HttpError(400, 'Informe o nome da Igreja/Paróquia/Sede.');
   }
 
+  // Resolve e valida a localização antes de abrir a transação. Para CEP
+  // brasileiro, a consulta externa também ocorre aqui para não manter uma
+  // transação do PostgreSQL aberta durante chamada HTTP.
+  const localizacao = await resolverLocalizacao(municipioId);
+  const endereco = await prepararEnderecoIgreja({
+    codigoPostal: input.codigoPostal,
+    municipioId,
+    subdivisaoLocalId: subdivisaoLocalIdInformada,
+    localizacao,
+    logradouro: logradouroInformado,
+    bairro: bairroInformado,
+    localidade: localidadeInformada
+  });
+
   return sequelize.transaction(async (transaction) => {
-    const localizacao = await resolverLocalizacao(
-      municipioId,
-      transaction
-    );
-
-    if (subdivisaoLocalId) {
-      await resolverSubdivisaoLocal(
-        subdivisaoLocalId,
-        municipioId,
-        transaction
-      );
-    }
-
     const duplicadas = await sequelize.query<{
       id: string;
       status: string;
@@ -1903,22 +2015,6 @@ export async function criarIgreja(
       throw new HttpError(409, detalhe);
     }
 
-    const codigoPostalId = await obterOuCriarCodigoPostal(
-      {
-        codigoPostalId: input.codigoPostalId,
-        codigoPostal: input.codigoPostal,
-        municipioId,
-        subdivisaoLocalId,
-        localizacao,
-        tipoLogradouro,
-        logradouro,
-        bairro,
-        localidade,
-        usuarioId
-      },
-      transaction
-    );
-
     const linhas = await sequelize.query<IgrejaRow>(
       `
         INSERT INTO legio.igreja
@@ -1932,7 +2028,7 @@ export async function criarIgreja(
           site,
           id_municipio,
           subdivisao_local_id,
-          codigo_postal_id,
+          codigo_postal,
           bairro,
           logradouro,
           numero_logradouro,
@@ -1952,7 +2048,7 @@ export async function criarIgreja(
           :site,
           CAST(:municipioId AS integer),
           CAST(:subdivisaoLocalId AS bigint),
-          CAST(:codigoPostalId AS bigint),
+          :codigoPostal,
           :bairro,
           :logradouro,
           :numeroLogradouro,
@@ -1966,8 +2062,8 @@ export async function criarIgreja(
           nome,
           padre,
           status,
-          codigo_postal_id::text,
           subdivisao_local_id::text,
+          codigo_postal,
           logradouro,
           numero_logradouro,
           complemento,
@@ -1983,10 +2079,10 @@ export async function criarIgreja(
           email,
           site,
           municipioId,
-          subdivisaoLocalId,
-          codigoPostalId,
-          bairro,
-          logradouro,
+          subdivisaoLocalId: endereco.subdivisaoLocalId,
+          codigoPostal: endereco.codigoPostal,
+          bairro: endereco.bairro,
+          logradouro: endereco.logradouro,
           numeroLogradouro,
           complemento,
           usuarioId
@@ -2003,13 +2099,12 @@ export async function criarIgreja(
       nome: igreja.nome,
       padre: igreja.padre,
       status: igreja.status,
-      codigoPostalId: igreja.codigo_postal_id,
       subdivisaoLocalId: igreja.subdivisao_local_id,
-      codigoPostal: normalizarCodigoPostal(input.codigoPostal),
-      logradouro: igreja.logradouro ?? logradouro,
+      codigoPostal: igreja.codigo_postal ?? null,
+      logradouro: igreja.logradouro ?? endereco.logradouro,
       numeroLogradouro: igreja.numero_logradouro ?? numeroLogradouro,
       complemento: igreja.complemento ?? complemento,
-      bairro: igreja.bairro ?? bairro
+      bairro: igreja.bairro ?? endereco.bairro
     };
   });
 }
@@ -2151,6 +2246,7 @@ export async function criar(
   const dataConstituicao = normalizarTextoOpcional(
     input.dataConstituicao
   );
+  const dataElevacao = normalizarDataElevacao(tipoCodigo, input.dataElevacao);
   const diaReuniaoId = normalizarTextoOpcional(
     input.diaReuniaoId
   );
@@ -2233,6 +2329,7 @@ export async function criar(
           estado_regiao,
           pais_codigo,
           data_constituicao,
+          data_elevacao,
           dia_reuniao,
           horario_inicio_reuniao,
           horario_fim_reuniao,
@@ -2264,6 +2361,7 @@ export async function criar(
           :estadoRegiao,
           :paisCodigo,
           CAST(:dataConstituicao AS date),
+          CAST(:dataElevacao AS date),
           CAST(:diaReuniaoId AS integer),
           CAST(:horarioInicioReuniao AS time),
           CAST(:horarioFimReuniao AS time),
@@ -2302,6 +2400,7 @@ export async function criar(
           estadoRegiao: localizacao.uf_nome,
           paisCodigo: codigoPaisLegado(localizacao.pais_sigla),
           dataConstituicao,
+          dataElevacao,
           diaReuniaoId,
           horarioInicioReuniao,
           horarioFimReuniao,
@@ -2432,9 +2531,9 @@ export async function obterPorId(
     pais_id: string;
     uf_id: string;
     subdivisao_local_id: string | null;
-    codigo_postal_id: string | null;
     codigo_postal: string | null;
     data_constituicao: string | null;
+    data_elevacao: string | null;
     dia_reuniao: string | null;
     horario_inicio_reuniao: string | null;
     horario_fim_reuniao: string | null;
@@ -2459,9 +2558,9 @@ export async function obterPorId(
         p.id::text AS pais_id,
         uf.id::text AS uf_id,
         i.subdivisao_local_id::text,
-        i.codigo_postal_id::text,
-        COALESCE(cp.codigo_postal, ul.cep) AS codigo_postal,
+        COALESCE(i.codigo_postal, ul.cep) AS codigo_postal,
         ul.data_constituicao::text,
+        ul.data_elevacao::text,
         ul.dia_reuniao::text,
         ul.horario_inicio_reuniao::text,
         ul.horario_fim_reuniao::text,
@@ -2481,8 +2580,6 @@ export async function obterPorId(
         ON p.id = uf.id_pais
       JOIN legio.igreja i
         ON i.id = ul.igreja_id
-      LEFT JOIN legio.codigo_postal cp
-        ON cp.id = i.codigo_postal_id
       WHERE ul.id = CAST(:id AS bigint)
       LIMIT 1
     `,
@@ -2512,9 +2609,9 @@ export async function obterPorId(
     paisId: item.pais_id,
     ufId: item.uf_id,
     subdivisaoLocalId: item.subdivisao_local_id,
-    codigoPostalId: item.codigo_postal_id,
     codigoPostal: item.codigo_postal,
     dataConstituicao: item.data_constituicao,
+    dataElevacao: item.data_elevacao,
     diaReuniaoId: item.dia_reuniao,
     horarioInicioReuniao: item.horario_inicio_reuniao?.slice(0, 5) ?? null,
     horarioFimReuniao: item.horario_fim_reuniao?.slice(0, 5) ?? null,
@@ -2554,6 +2651,7 @@ export async function atualizar(
   const telefone = normalizarTextoOpcional(input.telefone);
   const site = normalizarTextoOpcional(input.site);
   const dataConstituicao = normalizarTextoOpcional(input.dataConstituicao);
+  const dataElevacao = normalizarDataElevacao(tipoCodigo, input.dataElevacao);
   const diaReuniaoId = normalizarTextoOpcional(input.diaReuniaoId);
   const horarioInicioReuniao = normalizarHoraOpcional(
     input.horarioInicioReuniao,
@@ -2636,6 +2734,7 @@ export async function atualizar(
           estado_regiao = :estadoRegiao,
           pais_codigo = :paisCodigo,
           data_constituicao = CAST(:dataConstituicao AS date),
+          data_elevacao = CAST(:dataElevacao AS date),
           dia_reuniao = CAST(:diaReuniaoId AS integer),
           horario_inicio_reuniao = CAST(:horarioInicioReuniao AS time),
           horario_fim_reuniao = CAST(:horarioFimReuniao AS time),
@@ -2673,6 +2772,7 @@ export async function atualizar(
           estadoRegiao: localizacao.uf_nome,
           paisCodigo: codigoPaisLegado(localizacao.pais_sigla),
           dataConstituicao,
+          dataElevacao,
           diaReuniaoId,
           horarioInicioReuniao,
           horarioFimReuniao,
