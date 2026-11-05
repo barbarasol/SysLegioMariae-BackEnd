@@ -35,6 +35,8 @@ type UsuarioMeRow = {
   pessoa_id: string;
   pessoa_nome: string;
   pessoa_nome_preferido: string | null;
+  pessoa_cpf: string | null;
+  pessoa_celular: string | null;
   membro_id: string | null;
 };
 
@@ -504,6 +506,8 @@ export async function me(
         p.id::text AS pessoa_id,
         p.nome AS pessoa_nome,
         p.nome_preferido AS pessoa_nome_preferido,
+        p.cpf AS pessoa_cpf,
+        p.celular AS pessoa_celular,
         m.id::text AS membro_id
       FROM legio.usuario u
       JOIN legio.pessoa p
@@ -530,9 +534,9 @@ export async function me(
     );
   }
 
-  const perfisGlobais = await sequelize.query<{ codigo: string }>(
+  const perfisGlobais = await sequelize.query<{ codigo: string; nome: string }>(
     `
-      SELECT pa.codigo
+      SELECT pa.codigo, pa.nome
       FROM legio.usuario_perfil_global upg
       JOIN legio.perfil_acesso pa
         ON pa.id = upg.perfil_id
@@ -610,15 +614,25 @@ export async function me(
     pessoa: {
       id: usuario.pessoa_id,
       nome: usuario.pessoa_nome,
-      nomePreferido: usuario.pessoa_nome_preferido
+      nomePreferido: usuario.pessoa_nome_preferido,
+      cpf: usuario.pessoa_cpf,
+      celular: usuario.pessoa_celular
     },
     membro: usuario.membro_id
       ? {
           id: usuario.membro_id
         }
       : null,
+    // Preserva o contrato usado em outros módulos e acrescenta
+    // os nomes efetivos dos perfis de acesso do banco de dados.
     perfisGlobais: perfisGlobais.map(
       (perfil) => perfil.codigo
+    ),
+    perfisGlobaisDetalhes: perfisGlobais.map(
+      (perfil) => ({
+        codigo: perfil.codigo,
+        nome: perfil.nome
+      })
     ),
     unidades: Array.from(
       unidadesMap.values()

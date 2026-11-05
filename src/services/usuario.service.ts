@@ -58,6 +58,8 @@ export type UsuarioCriado = {
     nomePreferido: string | null;
   };
   perfisGlobais: string[];
+  /** true quando foi criado somente o usuário, reutilizando legio.pessoa. */
+  pessoaReutilizada: boolean;
 };
 
 export type FiltrosListarUsuarios = {
@@ -1992,154 +1994,191 @@ export async function criar(
       input.nomePreferido
     );
 
-  const cpf =
+  const cpfInformado =
     normalizarTextoOpcional(
       input.cpf
     );
+
+  // O cadastro de pessoa pode conter CPF com ou sem pontuação.
+  const cpf =
+    cpfInformado
+      ? cpfInformado.replace(/\D/g, '')
+      : null;
+
+  if (cpfInformado && !cpf) {
+    throw new HttpError(
+      400,
+      'Informe um CPF válido.'
+    );
+  }
 
   const celular =
     normalizarTextoOpcional(
       input.celular
     );
 
-  /*
-   * Regra:
-   * criar conta NÃO cria membro
-   * e NÃO atribui perfil.
-   *
-   * A pessoa existe como identidade civil do usuário.
-   * O registro em legio.membro só será criado
-   * caso essa pessoa seja efetivamente legionária.
-   */
-  const usuariosExistentes =
-    await sequelize.query<UsuarioExistenteRow>(
-      `
-        SELECT id::text
-        FROM legio.usuario
-        WHERE lower(email) =
-              lower(:email)
-        LIMIT 1
-      `,
-      {
-        replacements: {
-          email
-        },
-        type:
-          QueryTypes.SELECT
-      }
-    );
-
-  if (
-    usuariosExistentes.length > 0
-  ) {
-    throw new HttpError(
-      409,
-      'Já existe um usuário cadastrado com este e-mail.'
-    );
-  }
-
-  if (cpf) {
-    const pessoasComCpf =
-      await sequelize.query<PessoaExistenteRow>(
-        `
-          SELECT id::text
-          FROM legio.pessoa
-          WHERE
-            regexp_replace(
-              COALESCE(cpf, ''),
-              '[^0-9]',
-              '',
-              'g'
-            )
-            =
-            regexp_replace(
-              :cpf,
-              '[^0-9]',
-              '',
-              'g'
-            )
-          LIMIT 1
-        `,
-        {
-          replacements: {
-            cpf
-          },
-          type:
-            QueryTypes.SELECT
-        }
-      );
-
-    if (
-      pessoasComCpf.length > 0
-    ) {
-      throw new HttpError(
-        409,
-        'Já existe uma pessoa cadastrada com este CPF.'
-      );
-    }
-  }
-
-  const senhaHash =
-    await argon2.hash(
-      senha,
-      {
-        type:
-          argon2.argon2id
-      }
-    );
+  // O novo usuário permanece PENDENTE_EMAIL e sem qualquer perfil.
+  // Esta operação NÃO cria membro, NÃO altera pessoa já cadastrada
+  // e NÃO concede automaticamente acesso a unidades.
+  const senhaHash = await argon2.hash(
+    senha,
+    { type: argon2.argon2id }
+  );
 
   return sequelize.transaction(
     async (transaction) => {
 
-      const pessoasInseridas =
-        await sequelize.query<{
-          id: string;
-          nome: string;
-          nome_preferido:
-            string | null;
-        }>(
+      // Todas as verificações e gravações usam a mesma transação.
+      const usuariosComEmail =
+        await sequelize.query<UsuarioExistenteRow>(
           `
-            INSERT INTO
-              legio.pessoa
-            (
-              nome,
-              nome_preferido,
-              email,
-              celular,
-              cpf,
-              ativo
-            )
-            VALUES
-            (
-              :nome,
-              :nomePreferido,
-              :email,
-              :celular,
-              :cpf,
-              TRUE
-            )
-            RETURNING
-              id::text,
-              nome,
-              nome_preferido
+            SELECT id::text
+            FROM legio.usuario
+            WHERE lower(email) = lower(:email)
+            LIMIT 1
           `,
           {
-            replacements: {
-              nome,
-              nomePreferido,
-              email,
-              celular,
-              cpf
-            },
-            type:
-              QueryTypes.SELECT,
+            replacements: { email },
+            type: QueryTypes.SELECT,
             transaction
           }
         );
 
-      const pessoa =
-        pessoasInseridas[0];
+      if (usuariosComEmail.length > 0) {
+        throw new HttpError(
+          409,
+          'Já existe um usuário cadastrado com este e-mail.'
+        );
+      }
 
+      type PessoaCadastroRow = {
+        id: string;
+        nome: string;
+        nome_preferido: string | null;
+      };
+
+      let pessoa: PessoaCadastroRow | undefined;
+      let pessoaReutilizada = false;
+
+      if (cpf) {
+        const pessoasComCpf =
+          await sequelize.query<PessoaCadastroRow>(
+            `
+              SELECT
+                id::text,
+                nome,
+                nome_preferido
+              FROM legio.pessoa
+              WHERE regexp_replace(
+                COALESCE(cpf, ''),
+                '[^0-9]', '', 'g'
+              ) = :cpf
+              ORDER BY id
+              LIMIT 2
+              FOR UPDATE
+            `,
+            {
+              replacements: { cpf },
+              type: QueryTypes.SELECT,
+              transaction
+            }
+          );
+
+        // Dados legados eventualmente duplicados exigem correção manual.
+        if (pessoasComCpf.length > 1) {
+          throw new HttpError(
+            409,
+            'Há mais de uma pessoa com este CPF. Solicite a regularização do cadastro.'
+          );
+        }
+
+        const pessoaExistente = pessoasComCpf[0];
+
+        if (pessoaExistente) {
+          // A pessoa pode ser legionária sem possuir conta de usuário.
+          // Impedir segunda conta inclusive se a anterior estiver inativa.
+          const usuariosDaPessoa =
+            await sequelize.query<UsuarioExistenteRow>(
+              `
+                SELECT id::text
+                FROM legio.usuario
+                WHERE pessoa_id = :pessoaId
+                LIMIT 1
+              `,
+              {
+                replacements: {
+                  pessoaId: pessoaExistente.id
+                },
+                type: QueryTypes.SELECT,
+                transaction
+              }
+            );
+
+          if (usuariosDaPessoa.length > 0) {
+            throw new HttpError(
+              409,
+              'Este CPF já está vinculado a um usuário do sistema.'
+            );
+          }
+
+          pessoa = pessoaExistente;
+          pessoaReutilizada = true;
+        }
+      }
+
+      if (!pessoa) {
+        // Pessoa nova: cria identidade civil somente se o CPF não
+        // localizar registro anterior. Não cria legio.membro.
+        const pessoasInseridas =
+          await sequelize.query<PessoaCadastroRow>(
+            `
+              INSERT INTO legio.pessoa
+                (
+                  nome,
+                  nome_preferido,
+                  email,
+                  celular,
+                  cpf,
+                  ativo
+                )
+              VALUES
+                (
+                  :nome,
+                  :nomePreferido,
+                  :email,
+                  :celular,
+                  :cpf,
+                  TRUE
+                )
+              RETURNING
+                id::text,
+                nome,
+                nome_preferido
+            `,
+            {
+              replacements: {
+                nome,
+                nomePreferido,
+                email,
+                celular,
+                cpf
+              },
+              type: QueryTypes.SELECT,
+              transaction
+            }
+          );
+
+        pessoa = pessoasInseridas[0];
+
+        if (!pessoa) {
+          throw new HttpError(
+            500,
+            'Não foi possível cadastrar a pessoa.'
+          );
+        }
+      }
+
+      // Nova conta associada à pessoa existente ou recém-criada.
       const usuariosInseridos =
         await sequelize.query<{
           id: string;
@@ -2147,21 +2186,20 @@ export async function criar(
           status: string;
         }>(
           `
-            INSERT INTO
-              legio.usuario
-            (
-              pessoa_id,
-              email,
-              senha_hash,
-              status
-            )
+            INSERT INTO legio.usuario
+              (
+                pessoa_id,
+                email,
+                senha_hash,
+                status
+              )
             VALUES
-            (
-              :pessoaId,
-              :email,
-              :senhaHash,
-              :status
-            )
+              (
+                :pessoaId,
+                :email,
+                :senhaHash,
+                :status
+              )
             RETURNING
               id::text,
               email,
@@ -2169,68 +2207,57 @@ export async function criar(
           `,
           {
             replacements: {
-              pessoaId:
-                pessoa.id,
+              pessoaId: pessoa.id,
               email,
               senhaHash,
-              status:
-                STATUS_CADASTRO_INICIAL
+              status: STATUS_CADASTRO_INICIAL
             },
-            type:
-              QueryTypes.SELECT,
+            type: QueryTypes.SELECT,
             transaction
           }
         );
 
-      const usuario =
-        usuariosInseridos[0];
+      const usuario = usuariosInseridos[0];
 
-      /*
-       * NÃO inserir:
-       * - legio.membro
-       * - legio.usuario_perfil_global
-       * - legio.usuario_unidade_perfil
-       *
-       * As permissões serão atribuídas posteriormente.
-       */
+      if (!usuario) {
+        throw new HttpError(
+          500,
+          'Não foi possível criar o usuário.'
+        );
+      }
 
+      // Não inserir em membro, usuario_perfil_global ou
+      // usuario_unidade_perfil. Acesso só após validação administrativa.
       await sequelize.query(
         `
-          INSERT INTO
-            legio.auditoria_evento
-          (
-            usuario_id,
-            acao,
-            entidade,
-            entidade_id,
-            dados_depois
-          )
-          VALUES
-          (
-            :usuarioId,
-            'USUARIO_CRIADO_SEM_PERFIL',
-            'legio.usuario',
-            :entidadeId,
-            CAST(
-              :dadosDepois AS jsonb
+          INSERT INTO legio.auditoria_evento
+            (
+              usuario_id,
+              acao,
+              entidade,
+              entidade_id,
+              dados_depois
             )
-          )
+          VALUES
+            (
+              :usuarioId,
+              'USUARIO_CRIADO_SEM_PERFIL',
+              'legio.usuario',
+              :entidadeId,
+              CAST(:dadosDepois AS jsonb)
+            )
         `,
         {
           replacements: {
-            usuarioId:
-              usuario.id,
-
-            entidadeId:
-              usuario.id,
-
-            dadosDepois:
-              JSON.stringify({
-                email,
-                status:
-                  STATUS_CADASTRO_INICIAL,
-                perfisGlobais: []
-              })
+            usuarioId: usuario.id,
+            entidadeId: usuario.id,
+            dadosDepois: JSON.stringify({
+              email,
+              pessoaId: pessoa.id,
+              pessoaReutilizada,
+              status: STATUS_CADASTRO_INICIAL,
+              perfisGlobais: []
+            })
           },
           transaction
         }
@@ -2238,24 +2265,17 @@ export async function criar(
 
       return {
         usuario: {
-          id:
-            usuario.id,
-          email:
-            usuario.email,
-          status:
-            usuario.status
+          id: usuario.id,
+          email: usuario.email,
+          status: usuario.status
         },
-
         pessoa: {
-          id:
-            pessoa.id,
-          nome:
-            pessoa.nome,
-          nomePreferido:
-            pessoa.nome_preferido
+          id: pessoa.id,
+          nome: pessoa.nome,
+          nomePreferido: pessoa.nome_preferido
         },
-
-        perfisGlobais: []
+        perfisGlobais: [],
+        pessoaReutilizada
       };
     }
   );
