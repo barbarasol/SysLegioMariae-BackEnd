@@ -12,6 +12,9 @@ import solicitacaoRoutes from './routes/solicitacao.routes.js';
 import membroRoutes from './routes/membro.routes.js';
 import oficialRoutes from './routes/oficial.routes.js';
 import solicitacaoOficialRoutes from './routes/solicitacao-oficial.routes.js';
+import unidadeNumerosRouter from './routes/unidade-numeros.routes.js';
+import unidadeVisitasRouter from './routes/unidade-visitas.routes.js';
+import unidadeInstitucionalRouter from './routes/unidade-institucional.routes.js';
 
 dotenv.config();
 
@@ -70,6 +73,10 @@ app.use(
   '/api/solicitacoes-oficiais', 
   solicitacaoOficialRoutes
 );
+
+app.use('/api/unidade-numeros', unidadeNumerosRouter);
+app.use('/api/unidade-visitas', unidadeVisitasRouter);
+app.use('/api/unidade-institucional', unidadeInstitucionalRouter);
 
 app.use(
   errorMiddleware
