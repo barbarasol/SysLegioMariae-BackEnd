@@ -89,6 +89,11 @@ type IgrejaRow = {
   numero_logradouro?: string | null;
   complemento?: string | null;
   bairro?: string | null;
+  celular?: string | null;
+  telefone?: string | null;
+  telefone2?: string | null;
+  email?: string | null;
+  site?: string | null;
 };
 
 
@@ -151,6 +156,16 @@ export type CriarUnidadeInput = {
   site?: string | null;
   municipioId: string;
   igrejaId: string;
+  subdivisaoLocalId?: string | null; // RA da unidade selecionada no cadastro
+  // Endereço da sede: independente do endereço cadastrado na paróquia.
+  sedeEnderecoProprio?: boolean;
+  copiarEnderecoParoquia?: boolean; // ação explícita; nunca implícita na edição
+  sedeSubdivisaoLocalId?: string | null;
+  sedeCodigoPostal?: string | null;
+  sedeLogradouro?: string | null;
+  sedeNumeroLogradouro?: string | null;
+  sedeComplemento?: string | null;
+  sedeBairro?: string | null;
   dataConstituicao?: string | null;
   dataElevacao?: string | null;
   diaReuniaoId?: string | null;
@@ -233,6 +248,8 @@ export type UnidadeEstrutura = {
   unidadeSuperiorNome: string | null;
   cidade: string | null;
   estadoRegiao: string | null;
+  ufSigla: string | null;
+  subdivisaoLocalNome: string | null;
   statusAprovacao: string;
   ativo: boolean;
 };
@@ -250,8 +267,15 @@ export type UnidadeDetalhe = {
   igrejaId: string;
   paisId: string;
   ufId: string;
-  subdivisaoLocalId: string | null;
-  codigoPostal: string | null;
+  subdivisaoLocalId: string | null; // subdivisão da paróquia
+  codigoPostal: string | null; // CEP da paróquia
+  sedeEnderecoProprio: boolean;
+  sedeSubdivisaoLocalId: string | null;
+  sedeCodigoPostal: string | null;
+  sedeLogradouro: string | null;
+  sedeNumeroLogradouro: string | null;
+  sedeComplemento: string | null;
+  sedeBairro: string | null;
   dataConstituicao: string | null;
   dataElevacao: string | null;
   diaReuniaoId: string | null;
@@ -328,6 +352,11 @@ export type IgrejaOpcao = {
   numeroLogradouro: string | null;
   complemento: string | null;
   bairro: string | null;
+  celular: string | null;
+  telefone: string | null;
+  telefone2: string | null;
+  email: string | null;
+  site: string | null;
 };
 
 export type CodigoPostalOpcao = {
@@ -835,6 +864,69 @@ async function resolverIgreja(
   }
 
   return igreja;
+}
+
+
+/**
+ * Mantém dois endereços autônomos: Igreja/Paróquia em legio.igreja e sede
+ * própria (ou cópia de compatibilidade) em legio.unidade_legionaria.
+ * O município da sede é sempre unidade_legionaria.municipio_id.
+ */
+async function resolverEnderecoSede(
+  input: CriarUnidadeInput | AtualizarUnidadeInput,
+  igreja: IgrejaRow,
+  municipioId: string,
+  transaction?: Transaction
+): Promise<{
+  subdivisaoLocalId: string | null;
+  codigoPostal: string | null;
+  logradouro: string | null;
+  numeroLogradouro: string | null;
+  complemento: string | null;
+  bairro: string | null;
+}> {
+  if (input.sedeEnderecoProprio !== true) {
+    // Na inclusão, o seletor de RA da unidade pode sobrescrever somente a RA
+    // copiada da paróquia, sem alterar endereço nem o cadastro da igreja.
+    const raInformada = normalizarTextoOpcional(input.subdivisaoLocalId);
+    if (raInformada) {
+      await resolverSubdivisaoLocal(raInformada, municipioId, transaction);
+    }
+    return {
+      subdivisaoLocalId: raInformada ?? igreja.subdivisao_local_id,
+      codigoPostal: igreja.codigo_postal ?? null,
+      logradouro: igreja.logradouro ?? null,
+      numeroLogradouro: igreja.numero_logradouro ?? null,
+      complemento: igreja.complemento ?? null,
+      bairro: igreja.bairro ?? null
+    };
+  }
+
+  const subdivisaoLocalId = normalizarTextoOpcional(input.sedeSubdivisaoLocalId);
+  if (subdivisaoLocalId) {
+    // Impede associação da subdivisão de outro município à sede.
+    await resolverSubdivisaoLocal(subdivisaoLocalId, municipioId, transaction);
+  }
+
+  const codigoPostal = normalizarTextoOpcionalMaiusculo(input.sedeCodigoPostal);
+  const logradouro = normalizarTextoOpcionalMaiusculo(input.sedeLogradouro);
+  const numeroLogradouro = normalizarTextoOpcionalMaiusculo(input.sedeNumeroLogradouro);
+  const complemento = normalizarTextoOpcionalMaiusculo(input.sedeComplemento);
+  const bairro = normalizarTextoOpcionalMaiusculo(input.sedeBairro);
+
+  if (!logradouro) {
+    throw new HttpError(400, 'Informe o logradouro da sede própria da unidade.');
+  }
+  if (codigoPostal && codigoPostal.length > 20) {
+    throw new HttpError(400, 'O CEP/Código Postal da sede aceita no máximo 20 caracteres.');
+  }
+  if (logradouro.length > 200 || (numeroLogradouro?.length ?? 0) > 30 ||
+      (complemento?.length ?? 0) > 150 || (bairro?.length ?? 0) > 120) {
+    throw new HttpError(400, 'Endereço da sede excede o limite permitido.');
+  }
+
+  return { subdivisaoLocalId, codigoPostal, logradouro,
+    numeroLogradouro, complemento, bairro };
 }
 
 async function validarSuperior(
@@ -1906,7 +1998,12 @@ export async function listarIgrejas(
         i.logradouro,
         i.numero_logradouro,
         i.complemento,
-        i.bairro
+        i.bairro,
+        i.celular,
+        i.telefone,
+        i.telefone2,
+        i.email,
+        i.site
       FROM legio.igreja i
       WHERE i.id_municipio = CAST(:municipioId AS integer)
         AND i.status = 'ATIVA'
@@ -1935,7 +2032,12 @@ export async function listarIgrejas(
     logradouro: item.logradouro ?? null,
     numeroLogradouro: item.numero_logradouro ?? null,
     complemento: item.complemento ?? null,
-    bairro: item.bairro ?? null
+    bairro: item.bairro ?? null,
+    celular: item.celular ?? null,
+    telefone: item.telefone ?? null,
+    telefone2: item.telefone2 ?? null,
+    email: item.email ?? null,
+    site: item.site ?? null
   }));
 }
 
@@ -2067,7 +2169,12 @@ export async function criarIgreja(
           logradouro,
           numero_logradouro,
           complemento,
-          bairro
+          bairro,
+          celular,
+          telefone,
+          telefone2,
+          email,
+          site
       `,
       {
         replacements: {
@@ -2104,7 +2211,139 @@ export async function criarIgreja(
       logradouro: igreja.logradouro ?? endereco.logradouro,
       numeroLogradouro: igreja.numero_logradouro ?? numeroLogradouro,
       complemento: igreja.complemento ?? complemento,
-      bairro: igreja.bairro ?? endereco.bairro
+      bairro: igreja.bairro ?? endereco.bairro,
+      celular: igreja.celular ?? celular,
+      telefone: igreja.telefone ?? telefone,
+      telefone2: igreja.telefone2 ?? telefone2,
+      email: igreja.email ?? email,
+      site: igreja.site ?? site
+    };
+  });
+}
+
+
+/**
+ * Corrige uma igreja existente, sem alterar os campos de endereço das unidades
+ * que a referenciam. Autoriza administrador global, responsável por uma unidade
+ * vinculada à igreja ou autor do cadastro (somente conta ativa).
+ */
+export async function atualizarIgreja(
+  igrejaIdValor: unknown,
+  input: CriarIgrejaInput
+): Promise<IgrejaOpcao> {
+  const igrejaId = normalizarId(igrejaIdValor, 'uma Igreja/Paróquia/Sede');
+  const usuarioId = normalizarId(input.usuarioId, 'um usuário');
+  const municipioId = normalizarId(input.municipioId, 'um Município/Localidade');
+  const nome = normalizarTextoMaiusculo(input.nome);
+  if (!nome || nome.length > 180) {
+    throw new HttpError(400, 'Informe um nome válido para a Igreja/Paróquia/Sede.');
+  }
+  const localizacao = await resolverLocalizacao(municipioId);
+  const endereco = await prepararEnderecoIgreja({
+    codigoPostal: input.codigoPostal,
+    municipioId,
+    subdivisaoLocalId: input.subdivisaoLocalId,
+    localizacao,
+    logradouro: input.logradouro,
+    bairro: input.bairro,
+    localidade: input.localidade
+  });
+  const valor = (v: unknown) => normalizarTextoOpcional(v);
+  const maiusculo = (v: unknown) => normalizarTextoOpcionalMaiusculo(v);
+  const campos = {
+    nome,
+    padre: maiusculo(input.padre),
+    celular: valor(input.celular),
+    telefone: valor(input.telefone),
+    telefone2: valor(input.telefone2),
+    email: valor(input.email),
+    site: valor(input.site),
+    numeroLogradouro: maiusculo(input.numeroLogradouro),
+    complemento: maiusculo(input.complemento),
+    logradouro: maiusculo(endereco.logradouro),
+    bairro: maiusculo(endereco.bairro),
+    codigoPostal: endereco.codigoPostal,
+    subdivisaoLocalId: endereco.subdivisaoLocalId
+  };
+  return sequelize.transaction(async (transaction) => {
+    const atuais = await sequelize.query<{
+      id: string;
+      id_municipio: string;
+      usu_inc_id: string | null;
+    }>(`
+      SELECT id::text, id_municipio::text, usu_inc_id::text
+      FROM legio.igreja
+      WHERE id = CAST(:igrejaId AS bigint) AND status = 'ATIVA'
+      FOR UPDATE
+    `, { replacements: { igrejaId }, type: QueryTypes.SELECT, transaction });
+    if (!atuais[0]) throw new HttpError(404, 'Igreja/Paróquia/Sede não encontrada ou inativa.');
+    if (atuais[0].id_municipio !== municipioId) {
+      throw new HttpError(400, 'Não é permitido alterar o município de uma igreja vinculada. Corrija o endereço dentro do município atual.');
+    }
+    const permissoes = await sequelize.query<{ pode_editar: boolean }>(`
+      SELECT EXISTS (
+        SELECT 1 FROM legio.usuario u
+        WHERE u.id = CAST(:usuarioId AS bigint) AND u.status = 'ATIVO' AND (
+          EXISTS (
+            SELECT 1 FROM legio.usuario_perfil_global up
+            JOIN legio.perfil_acesso pa ON pa.id = up.perfil_id
+            WHERE up.usuario_id = u.id AND pa.ativo = TRUE
+              AND pa.codigo IN ('PLATFORM_OWNER', 'PLATFORM_ADMIN')
+          ) OR EXISTS (
+            SELECT 1 FROM legio.usuario_unidade_perfil up
+            JOIN legio.perfil_acesso pa ON pa.id = up.perfil_id
+            JOIN legio.unidade_legionaria ul ON ul.id = up.unidade_id
+            WHERE up.usuario_id = u.id AND up.ativo = TRUE AND pa.ativo = TRUE
+              AND pa.codigo IN ('ADMIN_UNIDADE', 'OPERADOR')
+              AND ul.igreja_id = CAST(:igrejaId AS bigint) AND ul.ativo = TRUE
+          ) OR EXISTS (
+            SELECT 1 FROM legio.igreja i
+            WHERE i.id = CAST(:igrejaId AS bigint) AND i.usu_inc_id = u.id
+          )
+        )
+      ) AS pode_editar
+    `, { replacements: { usuarioId, igrejaId }, type: QueryTypes.SELECT, transaction });
+    if (!permissoes[0]?.pode_editar) {
+      throw new HttpError(403, 'Seu perfil não pode editar esta Igreja/Paróquia/Sede.');
+    }
+    const repetidos = await sequelize.query<{ id: string }>(`
+      SELECT id::text FROM legio.igreja
+      WHERE id <> CAST(:igrejaId AS bigint)
+        AND id_municipio = CAST(:municipioId AS integer)
+        AND lower(btrim(nome)) = lower(btrim(:nome)) LIMIT 1
+    `, { replacements: { igrejaId, municipioId, nome }, type: QueryTypes.SELECT, transaction });
+    if (repetidos[0]) throw new HttpError(409, 'Já existe uma Igreja/Paróquia/Sede com esse nome no município.');
+    const resultado = await sequelize.query<IgrejaRow>(`
+      UPDATE legio.igreja SET
+        nome = :nome, padre = :padre,
+        celular = :celular, telefone = :telefone, telefone2 = :telefone2,
+        email = :email, site = :site,
+        subdivisao_local_id = CAST(:subdivisaoLocalId AS bigint),
+        codigo_postal = :codigoPostal, logradouro = :logradouro,
+        numero_logradouro = :numeroLogradouro, complemento = :complemento,
+        bairro = :bairro, usu_alt_id = CAST(:usuarioId AS bigint),
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = CAST(:igrejaId AS bigint)
+      RETURNING id::text, nome, padre, status, subdivisao_local_id::text,
+        codigo_postal, logradouro, numero_logradouro, complemento,
+        bairro, celular, telefone, telefone2, email, site
+    `, {
+      replacements: { igrejaId, municipioId, usuarioId, ...campos },
+      type: QueryTypes.SELECT, transaction
+    });
+    const igreja = resultado[0];
+    if (!igreja) throw new HttpError(404, 'Não foi possível atualizar a igreja.');
+    return {
+      id: igreja.id, nome: igreja.nome, padre: igreja.padre, status: igreja.status,
+      subdivisaoLocalId: igreja.subdivisao_local_id,
+      codigoPostal: igreja.codigo_postal ?? null,
+      logradouro: igreja.logradouro ?? null,
+      numeroLogradouro: igreja.numero_logradouro ?? null,
+      complemento: igreja.complemento ?? null,
+      bairro: igreja.bairro ?? null,
+      celular: igreja.celular ?? null, telefone: igreja.telefone ?? null,
+      telefone2: igreja.telefone2 ?? null, email: igreja.email ?? null,
+      site: igreja.site ?? null
     };
   });
 }
@@ -2139,13 +2378,15 @@ export async function listar(
         ul.nome,
         ul.nome_reduzido,
         tu.codigo AS tipo,
-        ul.cidade,
-        ul.estado_regiao,
+        m.nome AS cidade,
+        uf.nome AS estado_regiao,
         ul.unidade_superior_id::text,
         ul.status_aprovacao
       FROM legio.unidade_legionaria ul
       JOIN legio.tipo_unidade tu
         ON tu.id = ul.tipo_unidade_id
+      LEFT JOIN legio.municipio m ON m.id = ul.municipio_id
+      LEFT JOIN legio.uf uf ON uf.id = m.id_uf
       WHERE ul.ativo = TRUE
         AND ul.status_aprovacao = 'APROVADA'
         AND (
@@ -2287,6 +2528,7 @@ export async function criar(
       municipioId,
       transaction
     );
+    const sede = await resolverEnderecoSede(input, igreja, municipioId, transaction);
 
     const fusoHorario = await validarFusoHorario(
       fusoHorarioInformado,
@@ -2323,6 +2565,7 @@ export async function criar(
           numero_logradouro,
           complemento,
           bairro,
+          subdivisao_local_id,
           municipio_id,
           igreja_id,
           cidade,
@@ -2355,6 +2598,7 @@ export async function criar(
           :numeroLogradouro,
           :complemento,
           :bairro,
+          CAST(:sedeSubdivisaoLocalId AS bigint),
           CAST(:municipioId AS integer),
           CAST(:igrejaId AS bigint),
           :cidade,
@@ -2389,11 +2633,12 @@ export async function criar(
           celular,
           telefone,
           site,
-          cep: igreja.codigo_postal ?? null,
-          logradouro: igreja.logradouro ?? null,
-          numeroLogradouro: igreja.numero_logradouro ?? null,
-          complemento: igreja.complemento ?? null,
-          bairro: igreja.bairro ?? null,
+          cep: sede.codigoPostal,
+          logradouro: sede.logradouro,
+          numeroLogradouro: sede.numeroLogradouro,
+          complemento: sede.complemento,
+          bairro: sede.bairro,
+          sedeSubdivisaoLocalId: sede.subdivisaoLocalId,
           municipioId,
           igrejaId,
           cidade: localizacao.municipio_nome,
@@ -2468,6 +2713,8 @@ export async function listarEstrutura(): Promise<UnidadeEstrutura[]> {
     unidade_superior_nome: string | null;
     cidade: string | null;
     estado_regiao: string | null;
+    uf_sigla: string | null;
+    subdivisao_local_nome: string | null;
     status_aprovacao: string;
     ativo: boolean;
   }>(
@@ -2480,8 +2727,10 @@ export async function listarEstrutura(): Promise<UnidadeEstrutura[]> {
         tu.nome AS tipo_nome,
         ul.unidade_superior_id::text,
         sup.nome AS unidade_superior_nome,
-        ul.cidade,
-        ul.estado_regiao,
+        m.nome AS cidade,
+        uf.nome AS estado_regiao,
+        uf.sigla AS uf_sigla,
+        sl.nome AS subdivisao_local_nome,
         ul.status_aprovacao,
         ul.ativo
       FROM legio.unidade_legionaria ul
@@ -2489,6 +2738,12 @@ export async function listarEstrutura(): Promise<UnidadeEstrutura[]> {
         ON tu.id = ul.tipo_unidade_id
       LEFT JOIN legio.unidade_legionaria sup
         ON sup.id = ul.unidade_superior_id
+      LEFT JOIN legio.municipio m
+        ON m.id = ul.municipio_id
+      LEFT JOIN legio.uf uf
+        ON uf.id = m.id_uf
+      LEFT JOIN legio.subdivisao_local sl
+        ON sl.id = ul.subdivisao_local_id
       WHERE ul.ativo = TRUE
       ORDER BY
         tu.ordem_hierarquica DESC NULLS LAST,
@@ -2507,6 +2762,8 @@ export async function listarEstrutura(): Promise<UnidadeEstrutura[]> {
     unidadeSuperiorNome: item.unidade_superior_nome,
     cidade: item.cidade,
     estadoRegiao: item.estado_regiao,
+    ufSigla: item.uf_sigla,
+    subdivisaoLocalNome: item.subdivisao_local_nome,
     statusAprovacao: item.status_aprovacao,
     ativo: item.ativo
   }));
@@ -2532,6 +2789,13 @@ export async function obterPorId(
     uf_id: string;
     subdivisao_local_id: string | null;
     codigo_postal: string | null;
+    sede_endereco_proprio: boolean;
+    sede_subdivisao_local_id: string | null;
+    sede_codigo_postal: string | null;
+    sede_logradouro: string | null;
+    sede_numero_logradouro: string | null;
+    sede_complemento: string | null;
+    sede_bairro: string | null;
     data_constituicao: string | null;
     data_elevacao: string | null;
     dia_reuniao: string | null;
@@ -2558,7 +2822,20 @@ export async function obterPorId(
         p.id::text AS pais_id,
         uf.id::text AS uf_id,
         i.subdivisao_local_id::text,
-        COALESCE(i.codigo_postal, ul.cep) AS codigo_postal,
+        i.codigo_postal AS codigo_postal,
+        ul.subdivisao_local_id::text AS sede_subdivisao_local_id,
+        ul.cep AS sede_codigo_postal,
+        ul.logradouro AS sede_logradouro,
+        ul.numero_logradouro AS sede_numero_logradouro,
+        ul.complemento AS sede_complemento,
+        ul.bairro AS sede_bairro,
+        (
+          ul.cep IS DISTINCT FROM i.codigo_postal OR
+          ul.logradouro IS DISTINCT FROM i.logradouro OR
+          ul.numero_logradouro IS DISTINCT FROM i.numero_logradouro OR
+          ul.complemento IS DISTINCT FROM i.complemento OR
+          ul.bairro IS DISTINCT FROM i.bairro
+        ) AS sede_endereco_proprio,
         ul.data_constituicao::text,
         ul.data_elevacao::text,
         ul.dia_reuniao::text,
@@ -2610,6 +2887,13 @@ export async function obterPorId(
     ufId: item.uf_id,
     subdivisaoLocalId: item.subdivisao_local_id,
     codigoPostal: item.codigo_postal,
+    sedeEnderecoProprio: item.sede_endereco_proprio,
+    sedeSubdivisaoLocalId: item.sede_subdivisao_local_id,
+    sedeCodigoPostal: item.sede_codigo_postal,
+    sedeLogradouro: item.sede_logradouro,
+    sedeNumeroLogradouro: item.sede_numero_logradouro,
+    sedeComplemento: item.sede_complemento,
+    sedeBairro: item.sede_bairro,
     dataConstituicao: item.data_constituicao,
     dataElevacao: item.data_elevacao,
     diaReuniaoId: item.dia_reuniao,
@@ -2700,6 +2984,56 @@ export async function atualizar(
     const tipo = await resolverTipo(tipoCodigo, transaction);
     const localizacao = await resolverLocalizacao(municipioId, transaction);
     const igreja = await resolverIgreja(igrejaId, municipioId, transaction);
+    // Ao editar, o endereço da unidade não muda ao corrigir / trocar igreja.
+    // A cópia dos dados da igreja exige um comando explícito do formulário.
+    let sede: Awaited<ReturnType<typeof resolverEnderecoSede>>;
+    if (input.sedeEnderecoProprio === true || input.copiarEnderecoParoquia === true) {
+      sede = await resolverEnderecoSede(
+        { ...input,
+          sedeEnderecoProprio: input.copiarEnderecoParoquia === true ? false : true,
+          subdivisaoLocalId: input.copiarEnderecoParoquia === true ? null : input.subdivisaoLocalId
+        },
+        igreja, municipioId, transaction
+      );
+    } else {
+      const anteriores = await sequelize.query<{
+        municipio_id: string;
+        subdivisao_local_id: string | null;
+        cep: string | null;
+        logradouro: string | null;
+        numero_logradouro: string | null;
+        complemento: string | null;
+        bairro: string | null;
+      }>(`SELECT municipio_id::text, subdivisao_local_id::text, cep,
+          logradouro, numero_logradouro, complemento, bairro
+          FROM legio.unidade_legionaria
+          WHERE id = CAST(:id AS bigint) FOR UPDATE`, {
+        replacements: { id }, type: QueryTypes.SELECT, transaction
+      });
+      const anterior = anteriores[0];
+      if (!anterior) throw new HttpError(404, 'Unidade não encontrada.');
+      if (anterior.municipio_id !== municipioId) {
+        throw new HttpError(400,
+          'Ao alterar o município da sede, informe novo endereço próprio ou use a ação Copiar endereço da paróquia.');
+      }
+      sede = {
+        subdivisaoLocalId: anterior.subdivisao_local_id,
+        codigoPostal: anterior.cep,
+        logradouro: anterior.logradouro,
+        numeroLogradouro: anterior.numero_logradouro,
+        complemento: anterior.complemento,
+        bairro: anterior.bairro
+      };
+      // Alterar a RA da unidade NÃO exige recadastrar seu endereço.
+      // Ausência do campo significa preservar a RA atual; null permite limpar.
+      if (input.subdivisaoLocalId !== undefined) {
+        const novaRa = normalizarTextoOpcional(input.subdivisaoLocalId);
+        if (novaRa) {
+          await resolverSubdivisaoLocal(novaRa, municipioId, transaction);
+        }
+        sede.subdivisaoLocalId = novaRa;
+      }
+    }
     const fusoHorario = await validarFusoHorario(
       fusoHorarioInformado,
       transaction
@@ -2728,6 +3062,7 @@ export async function atualizar(
           numero_logradouro = :numeroLogradouro,
           complemento = :complemento,
           bairro = :bairro,
+          subdivisao_local_id = CAST(:sedeSubdivisaoLocalId AS bigint),
           municipio_id = CAST(:municipioId AS integer),
           igreja_id = CAST(:igrejaId AS bigint),
           cidade = :cidade,
@@ -2761,11 +3096,12 @@ export async function atualizar(
           celular,
           telefone,
           site,
-          cep: igreja.codigo_postal ?? null,
-          logradouro: igreja.logradouro ?? null,
-          numeroLogradouro: igreja.numero_logradouro ?? null,
-          complemento: igreja.complemento ?? null,
-          bairro: igreja.bairro ?? null,
+          cep: sede.codigoPostal,
+          logradouro: sede.logradouro,
+          numeroLogradouro: sede.numeroLogradouro,
+          complemento: sede.complemento,
+          bairro: sede.bairro,
+          sedeSubdivisaoLocalId: sede.subdivisaoLocalId,
           municipioId,
           igrejaId,
           cidade: localizacao.municipio_nome,

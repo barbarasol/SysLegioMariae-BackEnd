@@ -15,6 +15,9 @@ import solicitacaoOficialRoutes from './routes/solicitacao-oficial.routes.js';
 import unidadeNumerosRouter from './routes/unidade-numeros.routes.js';
 import unidadeVisitasRouter from './routes/unidade-visitas.routes.js';
 import unidadeInstitucionalRouter from './routes/unidade-institucional.routes.js';
+import igrejaEdicaoRouter from './routes/igreja-edicao.routes.js';
+import controleVersaoRouter from './routes/controle-versao.routes.js';
+
 
 dotenv.config();
 
@@ -40,6 +43,11 @@ app.get('/', (req, res) => {
 });
 
 app.use(
+  '/api/controle-versao', 
+  controleVersaoRouter
+);
+
+app.use(
   '/api/auth',
   authRoutes
 );
@@ -48,6 +56,11 @@ app.use(
   '/api/usuarios',
   usuarioRoutes
 )
+
+app.use(
+  '/api/unidades/igrejas', 
+  igrejaEdicaoRouter
+);
 
 app.use(
   '/api/unidades',
