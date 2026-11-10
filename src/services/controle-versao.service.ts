@@ -5,6 +5,7 @@ import { HttpError } from '../utils/http-error.js';
 export type ControleVersao = {
   id: string;
   ultima_versao: string;
+  implementacao: string | null;
   usu_inc_id: string;
   usu_alt_id: string | null;
   usu_inc_nome: string;
@@ -32,15 +33,33 @@ function validarId(id: unknown): string {
   return id;
 }
 
-function validarBody(body: unknown): string {
+type DadosVersao = {
+  ultimaVersao: string;
+  implementacao: string | null;
+  informouImplementacao: boolean;
+};
+
+function validarBody(body: unknown): DadosVersao {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
-    throw new HttpError(400, 'Informe o objeto com ultima_versao.');
+    throw new HttpError(400, 'Informe o objeto com ultima_versao e implementacao.');
   }
   const obj = body as Record<string, unknown>;
-  if (Object.keys(obj).some((key) => key !== 'ultima_versao')) {
-    throw new HttpError(400, 'Somente ultima_versao pode ser informado.');
+  if (Object.keys(obj).some((key) => key !== 'ultima_versao' && key !== 'implementacao')) {
+    throw new HttpError(400, 'Somente ultima_versao e implementacao podem ser informados.');
   }
-  return validarVersao(obj.ultima_versao);
+  const informouImplementacao = Object.prototype.hasOwnProperty.call(obj, 'implementacao');
+  if (informouImplementacao && obj.implementacao !== null && typeof obj.implementacao !== 'string') {
+    throw new HttpError(400, 'Implementação deve ser um texto.');
+  }
+  // TEXT é opcional. Campo vazio é gravado como NULL.
+  const implementacao = typeof obj.implementacao === 'string'
+    ? (obj.implementacao.trim() || null)
+    : null;
+  return {
+    ultimaVersao: validarVersao(obj.ultima_versao),
+    implementacao,
+    informouImplementacao
+  };
 }
 
 /**
@@ -50,6 +69,7 @@ function validarBody(body: unknown): string {
 const COLUNAS = `
   cv.id::text AS id,
   cv.ultima_versao,
+  cv.implementacao,
   cv.usu_inc_id::text AS usu_inc_id,
   cv.usu_alt_id::text AS usu_alt_id,
   COALESCE(NULLIF(BTRIM(p_inc.nome), ''), 'Usuário sem nome') AS usu_inc_nome,
@@ -93,29 +113,33 @@ export async function listar(): Promise<ControleVersao[]> {
 }
 
 export async function criar(usuarioId: string, body: unknown): Promise<ControleVersao> {
-  const ultimaVersao = validarBody(body);
+  const { ultimaVersao, implementacao } = validarBody(body);
   return sequelize.transaction(async (transaction) => {
     const [inserido] = await sequelize.query<{ id: string }>(`
-      INSERT INTO legio.controle_versao (ultima_versao, usu_inc_id)
-      VALUES (:ultimaVersao, CAST(:usuarioId AS bigint))
+      INSERT INTO legio.controle_versao (ultima_versao, implementacao, usu_inc_id)
+      VALUES (:ultimaVersao, :implementacao, CAST(:usuarioId AS bigint))
       RETURNING id::text AS id
-    `, { replacements: { ultimaVersao, usuarioId }, transaction, type: QueryTypes.SELECT });
+    `, { replacements: { ultimaVersao, implementacao, usuarioId }, transaction, type: QueryTypes.SELECT });
     return obterPorId(inserido.id, transaction);
   });
 }
 
 export async function atualizar(usuarioId: string, idBruto: unknown, body: unknown): Promise<ControleVersao> {
   const id = validarId(idBruto);
-  const ultimaVersao = validarBody(body);
+  const { ultimaVersao, implementacao, informouImplementacao } = validarBody(body);
   return sequelize.transaction(async (transaction) => {
     const [alterado] = await sequelize.query<{ id: string }>(`
       UPDATE legio.controle_versao SET
         ultima_versao = :ultimaVersao,
+        implementacao = CASE
+          WHEN :informouImplementacao THEN :implementacao
+          ELSE implementacao
+        END,
         usu_alt_id = CAST(:usuarioId AS bigint),
         update_at = clock_timestamp()
       WHERE id = CAST(:id AS bigint)
       RETURNING id::text AS id
-    `, { replacements: { id, ultimaVersao, usuarioId }, transaction, type: QueryTypes.SELECT });
+    `, { replacements: { id, ultimaVersao, implementacao, informouImplementacao, usuarioId }, transaction, type: QueryTypes.SELECT });
     if (!alterado) throw new HttpError(404, 'Versão não encontrada.');
     return obterPorId(alterado.id, transaction);
   });

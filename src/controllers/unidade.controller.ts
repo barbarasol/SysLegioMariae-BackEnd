@@ -365,12 +365,12 @@ export async function criarIgreja(
 }
 
 export async function listarEstrutura(
-  _req: AuthenticatedRequest,
+  req: AuthenticatedRequest,
   res: Response,
   next: NextFunction
 ): Promise<void> {
   try {
-    res.json(await unidadeService.listarEstrutura());
+    res.json(await unidadeService.listarEstrutura(exigirUsuarioId(req)));
   } catch (error) {
     next(error);
   }

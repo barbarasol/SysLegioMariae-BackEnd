@@ -47,7 +47,6 @@ type Registro = Record<string, unknown> & {
 type Acesso = {
   pode_ler: boolean;
   pode_editar: boolean;
-  pode_reabrir: boolean;
 };
 
 type AcessoRow = {
@@ -80,7 +79,7 @@ export function validarCompetencia(anoValor: unknown, mesValor: unknown): { ano:
 export async function verificarAcesso(
   usuarioId: string,
   unidadeId: string,
-  modo: 'LER' | 'EDITAR' | 'REABRIR',
+  modo: 'LER' | 'EDITAR',
   transaction?: Transaction
 ): Promise<Acesso> {
   const unidades = await sequelize.query<{ id: string }>(`
@@ -133,12 +132,10 @@ export async function verificarAcesso(
   if (!a) throw new HttpError(403, 'Não foi possível verificar permissões da conta.');
   const acesso: Acesso = {
     pode_ler: !!(a.global_leitura || a.unidade_leitura),
-    pode_editar: !!(a.global_administracao || a.unidade_administracao),
-    pode_reabrir: !!a.global_administracao
+    pode_editar: !!(a.global_administracao || a.unidade_administracao)
   };
 
-  const permitido = modo === 'LER' ? acesso.pode_ler
-    : modo === 'EDITAR' ? acesso.pode_editar : acesso.pode_reabrir;
+  const permitido = modo === 'LER' ? acesso.pode_ler : acesso.pode_editar;
   if (!permitido) {
     throw new HttpError(403, 'Seu perfil não possui permissão para esta operação na unidade.');
   }
@@ -212,7 +209,7 @@ export async function obter(
   const { ano, mes } = validarCompetencia(anoValor, mesValor);
   const acesso = await verificarAcesso(usuarioId, unidadeId, 'LER');
   const registro = await buscarRegistro(unidadeId, ano, mes);
-  return { registro, permissoes: { editar: acesso.pode_editar, reabrir: acesso.pode_reabrir } };
+  return { registro, permissoes: { editar: acesso.pode_editar } };
 }
 
 export async function listarHistorico(
@@ -234,11 +231,13 @@ export async function listarHistorico(
 
 export async function salvar(
   usuarioId: string, unidadeIdValor: unknown,
-  anoValor: unknown, mesValor: unknown, payload: unknown
+  anoValor: unknown, mesValor: unknown, payload: unknown, copiadoDeIdValor?: unknown
 ) {
   const unidadeId = validarId(unidadeIdValor, 'Unidade');
   const { ano, mes } = validarCompetencia(anoValor, mesValor);
   const valores = normalizarValores(payload);
+  const copiadoDeId = copiadoDeIdValor === null || copiadoDeIdValor === undefined || copiadoDeIdValor === ''
+    ? null : validarId(copiadoDeIdValor, 'Registro de origem');
 
   return sequelize.transaction(async transaction => {
     await verificarAcesso(usuarioId, unidadeId, 'EDITAR', transaction);
@@ -247,128 +246,50 @@ export async function salvar(
       SELECT id FROM legio.unidade_legionaria WHERE id = :unidadeId FOR UPDATE
     `, { replacements: { unidadeId }, transaction, type: QueryTypes.SELECT });
     const antes = await buscarRegistro(unidadeId, ano, mes, transaction);
-    if (antes?.status === 'CONFIRMADO') {
-      throw new HttpError(409, 'Competência confirmada. Somente um administrador global pode reabri-la.');
+    // A cópia é facultativa e só referencia um registro da MESMA unidade.
+    // Nunca sobrescreve o vínculo de origem ao editar uma competência existente.
+    let competenciaFonte: { ano: number; mes: number } | null = null;
+    if (!antes && copiadoDeId !== null) {
+      const fontes = await sequelize.query<{ ano: number; mes: number }>(`
+        SELECT ano, mes FROM legio.unidade_numeros
+        WHERE id = :copiadoDeId AND unidade_id = :unidadeId LIMIT 1
+      `, {
+        replacements: { copiadoDeId, unidadeId }, type: QueryTypes.SELECT, transaction
+      });
+      competenciaFonte = fontes[0] ?? null;
+      if (!competenciaFonte) {
+        throw new HttpError(400, 'A competência de origem não pertence à unidade selecionada.');
+      }
     }
-
     const colunas = [...CAMPOS_NUMEROS];
     const sqlColunas = colunas.join(', ');
     const sqlValores = colunas.map(c => `:${c}`).join(', ');
     const updates = colunas.map(c => `${c} = EXCLUDED.${c}`).join(',\n');
+    // O status CONFIRMADO permanece por compatibilidade com relatórios antigos.
+    // Ele NÃO representa bloqueio: qualquer usuário com permissão EDITAR pode salvar novamente.
     const linhas = await sequelize.query<Registro>(`
       INSERT INTO legio.unidade_numeros
-        (unidade_id, ano, mes, ${sqlColunas}, usu_inc_id, usu_alt_id)
-      VALUES (:unidadeId, :ano, :mes, ${sqlValores}, :usuarioId, :usuarioId)
+        (unidade_id, ano, mes, ${sqlColunas}, status, origem, copiado_de_id,
+         confirmado_em, confirmado_por_usuario_id, usu_inc_id, usu_alt_id)
+      VALUES (:unidadeId, :ano, :mes, ${sqlValores}, 'CONFIRMADO', :origem, :copiadoDeId,
+              CURRENT_TIMESTAMP, :usuarioId, :usuarioId, :usuarioId)
       ON CONFLICT (unidade_id, ano, mes) DO UPDATE SET
-        ${updates}, usu_alt_id = :usuarioId, updated_at = CURRENT_TIMESTAMP
-      WHERE legio.unidade_numeros.status = 'RASCUNHO'
+        ${updates}, status = 'CONFIRMADO',
+        confirmado_em = COALESCE(legio.unidade_numeros.confirmado_em, CURRENT_TIMESTAMP),
+        confirmado_por_usuario_id = COALESCE(legio.unidade_numeros.confirmado_por_usuario_id, :usuarioId),
+        usu_alt_id = :usuarioId, updated_at = CURRENT_TIMESTAMP
       RETURNING *
     `, {
-      replacements: { unidadeId, ano, mes, ...valores, usuarioId },
+      replacements: {
+        unidadeId, ano, mes, ...valores, usuarioId, copiadoDeId,
+        origem: competenciaFonte && mes === 1 && competenciaFonte.ano < ano ? 'VIRADA_ANO' : 'MANUAL'
+      },
       type: QueryTypes.SELECT, transaction
     });
     const registro = linhas[0];
-    if (!registro) throw new HttpError(409, 'A competência foi confirmada por outro usuário. Atualize a tela.');
+    if (!registro) throw new HttpError(409, 'Não foi possível gravar a competência. Tente novamente.');
     await registrarAuditoria(usuarioId, registro, antes ? 'NUMEROS_UNIDADE_ATUALIZADOS' : 'NUMEROS_UNIDADE_CRIADOS', antes, registro, transaction);
     return { registro };
   });
 }
 
-export async function confirmar(
-  usuarioId: string, unidadeIdValor: unknown, anoValor: unknown, mesValor: unknown
-) {
-  const unidadeId = validarId(unidadeIdValor, 'Unidade');
-  const { ano, mes } = validarCompetencia(anoValor, mesValor);
-  return sequelize.transaction(async transaction => {
-    await verificarAcesso(usuarioId, unidadeId, 'EDITAR', transaction);
-    await sequelize.query(`SELECT id FROM legio.unidade_legionaria WHERE id = :unidadeId FOR UPDATE`,
-      { replacements: { unidadeId }, transaction, type: QueryTypes.SELECT });
-    const antes = await buscarRegistro(unidadeId, ano, mes, transaction);
-    if (!antes) throw new HttpError(404, 'Salve os números antes de confirmar.');
-    if (antes.status !== 'RASCUNHO') throw new HttpError(409, 'Competência já confirmada.');
-    if (!CAMPOS_NUMEROS.some(c => antes[c] !== null && antes[c] !== undefined)) {
-      throw new HttpError(400, 'Informe pelo menos um indicador antes de confirmar.');
-    }
-    const alterados = await sequelize.query<Registro>(`
-      UPDATE legio.unidade_numeros
-      SET status = 'CONFIRMADO', confirmado_em = CURRENT_TIMESTAMP,
-          confirmado_por_usuario_id = :usuarioId,
-          usu_alt_id = :usuarioId, updated_at = CURRENT_TIMESTAMP
-      WHERE id = :id AND status = 'RASCUNHO'
-      RETURNING *
-    `, { replacements: { id: antes.id, usuarioId }, type: QueryTypes.SELECT, transaction });
-    const registro = alterados[0];
-    if (!registro) throw new HttpError(409, 'A competência já foi confirmada.');
-    await registrarAuditoria(usuarioId, registro, 'NUMEROS_UNIDADE_CONFIRMADOS', antes, registro, transaction);
-    return { registro };
-  });
-}
-
-export async function reabrir(
-  usuarioId: string, unidadeIdValor: unknown, anoValor: unknown, mesValor: unknown
-) {
-  const unidadeId = validarId(unidadeIdValor, 'Unidade');
-  const { ano, mes } = validarCompetencia(anoValor, mesValor);
-  return sequelize.transaction(async transaction => {
-    await verificarAcesso(usuarioId, unidadeId, 'REABRIR', transaction);
-    await sequelize.query(`SELECT id FROM legio.unidade_legionaria WHERE id = :unidadeId FOR UPDATE`,
-      { replacements: { unidadeId }, transaction, type: QueryTypes.SELECT });
-    const antes = await buscarRegistro(unidadeId, ano, mes, transaction);
-    if (!antes) throw new HttpError(404, 'Competência não cadastrada.');
-    if (antes.status !== 'CONFIRMADO') throw new HttpError(409, 'A competência já está como rascunho.');
-    const linhas = await sequelize.query<Registro>(`
-      UPDATE legio.unidade_numeros
-      SET status = 'RASCUNHO', confirmado_em = NULL,
-          confirmado_por_usuario_id = NULL, usu_alt_id = :usuarioId, updated_at = CURRENT_TIMESTAMP
-      WHERE id = :id RETURNING *
-    `, { replacements: { id: antes.id, usuarioId }, type: QueryTypes.SELECT, transaction });
-    const registro = linhas[0];
-    await registrarAuditoria(usuarioId, registro, 'NUMEROS_UNIDADE_REABERTOS', antes, registro, transaction);
-    return { registro };
-  });
-}
-
-export async function copiarAnterior(
-  usuarioId: string, unidadeIdValor: unknown, anoValor: unknown, mesValor: unknown
-) {
-  const unidadeId = validarId(unidadeIdValor, 'Unidade');
-  const { ano, mes } = validarCompetencia(anoValor, mesValor);
-  return sequelize.transaction(async transaction => {
-    await verificarAcesso(usuarioId, unidadeId, 'EDITAR', transaction);
-    await sequelize.query(`SELECT id FROM legio.unidade_legionaria WHERE id = :unidadeId FOR UPDATE`,
-      { replacements: { unidadeId }, transaction, type: QueryTypes.SELECT });
-    if (await buscarRegistro(unidadeId, ano, mes, transaction)) {
-      throw new HttpError(409, 'Já existe um registro para esta competência. A cópia não sobrescreve dados.');
-    }
-    const fonte = await sequelize.query<Registro>(`
-      SELECT * FROM legio.unidade_numeros
-      WHERE unidade_id = :unidadeId
-        AND (ano < :ano OR (ano = :ano AND mes < :mes))
-      ORDER BY ano DESC, mes DESC LIMIT 1
-    `, { replacements: { unidadeId, ano, mes }, type: QueryTypes.SELECT, transaction });
-    if (!fonte[0]) throw new HttpError(404, 'Nenhuma competência anterior disponível para copiar.');
-    const origem = fonte[0];
-    const colunas = [...CAMPOS_NUMEROS];
-    const registros = await sequelize.query<Registro>(`
-      INSERT INTO legio.unidade_numeros (
-        unidade_id, ano, mes, ${colunas.join(', ')},
-        status, origem, copiado_de_id, usu_inc_id, usu_alt_id
-      ) VALUES (
-        :unidadeId, :ano, :mes, ${colunas.map(c => `:${c}`).join(', ')},
-        'RASCUNHO', :origem, :copiadoDeId, :usuarioId, :usuarioId
-      )
-      ON CONFLICT (unidade_id, ano, mes) DO NOTHING
-      RETURNING *
-    `, {
-      replacements: {
-        unidadeId, ano, mes, usuarioId,
-        ...Object.fromEntries(colunas.map(c => [c, origem[c] ?? null])),
-        origem: mes === 1 && origem.ano < ano ? 'VIRADA_ANO' : 'MANUAL',
-        copiadoDeId: origem.id
-      }, type: QueryTypes.SELECT, transaction
-    });
-    if (!registros[0]) throw new HttpError(409, 'Outra operação criou esta competência. Atualize a tela.');
-    await registrarAuditoria(usuarioId, registros[0], 'NUMEROS_UNIDADE_COPIADOS', null, registros[0], transaction);
-    return { registro: registros[0] };
-  });
-}

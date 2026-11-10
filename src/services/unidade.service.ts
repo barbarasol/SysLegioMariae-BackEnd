@@ -1,6 +1,7 @@
 import { QueryTypes, Transaction } from 'sequelize';
 import { sequelize } from '../config/database.js';
 import { HttpError } from '../utils/http-error.js';
+import { listarIndicadoresEstrutura, type IndicadoresEstrutura } from './estrutura-indicadores.service.js';
 
 /** Data de Elevação: validação no servidor, incluindo ano bissexto. */
 function normalizarDataElevacao(tipoCodigo: string, valor: unknown): string | null {
@@ -252,6 +253,7 @@ export type UnidadeEstrutura = {
   subdivisaoLocalNome: string | null;
   statusAprovacao: string;
   ativo: boolean;
+  numeros?: IndicadoresEstrutura | null;
 };
 
 export type UnidadeDetalhe = {
@@ -2702,7 +2704,7 @@ export async function criar(
  * Estrutura completa de unidades ativas para a tela de Afiliação.
  * Inclui unidades pendentes para permitir gestão/edição do cadastro.
  */
-export async function listarEstrutura(): Promise<UnidadeEstrutura[]> {
+export async function listarEstrutura(usuarioId: string): Promise<UnidadeEstrutura[]> {
   const linhas = await sequelize.query<{
     id: string;
     nome: string;
@@ -2752,6 +2754,8 @@ export async function listarEstrutura(): Promise<UnidadeEstrutura[]> {
     { type: QueryTypes.SELECT }
   );
 
+  const indicadoresPorId = await listarIndicadoresEstrutura(usuarioId);
+
   return linhas.map((item) => ({
     id: item.id,
     nome: item.nome,
@@ -2765,7 +2769,8 @@ export async function listarEstrutura(): Promise<UnidadeEstrutura[]> {
     ufSigla: item.uf_sigla,
     subdivisaoLocalNome: item.subdivisao_local_nome,
     statusAprovacao: item.status_aprovacao,
-    ativo: item.ativo
+    ativo: item.ativo,
+    numeros: indicadoresPorId.get(item.id) ?? null
   }));
 }
 

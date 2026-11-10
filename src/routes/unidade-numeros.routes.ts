@@ -9,8 +9,5 @@ router.use(authMiddleware);
 router.get('/:unidadeId', controller.listarHistorico);
 router.get('/:unidadeId/:ano/:mes', controller.obter);
 router.put('/:unidadeId/:ano/:mes', controller.salvar);
-router.post('/:unidadeId/:ano/:mes/confirmar', controller.confirmar);
-router.post('/:unidadeId/:ano/:mes/reabrir', controller.reabrir);
-router.post('/:unidadeId/:ano/:mes/copiar-anterior', controller.copiarAnterior);
 
 export default router;
