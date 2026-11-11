@@ -12,6 +12,14 @@ import { HttpError } from '../utils/http-error.js';
  * O req.query do Express pode trazer string, array ou objeto aninhado.
  * Como os filtros são escalares, extraímos apenas quando for string.
  */
+function idUsuario(req: AuthenticatedRequest): string {
+  const usuarioId = req.auth?.usuarioId;
+  if (!usuarioId) {
+    throw new HttpError(401, 'Sessão não autenticada.');
+  }
+  return String(usuarioId);
+}
+
 function queryString(valor: unknown): string | null {
   if (typeof valor === 'string') {
     const limpo = valor.trim();
@@ -38,7 +46,7 @@ export async function listar(
       categoriaCodigo: queryString(req.query.categoria)
     };
 
-    const membros = await membroService.listar(filtros);
+    const membros = await membroService.listar(idUsuario(req), filtros);
 
     res.json(membros);
   } catch (error) {
@@ -56,7 +64,7 @@ export async function resumo(
   next: NextFunction
 ): Promise<void> {
   try {
-    const contadores = await membroService.resumo();
+    const contadores = await membroService.resumo(idUsuario(req));
 
     res.json(contadores);
   } catch (error) {
@@ -75,7 +83,7 @@ export async function catalogos(
   next: NextFunction
 ): Promise<void> {
   try {
-    const dados = await membroService.catalogos();
+    const dados = await membroService.catalogos(idUsuario(req));
 
     res.json(dados);
   } catch (error) {
@@ -89,11 +97,7 @@ export async function criar(
   next: NextFunction
 ): Promise<void> {
   try {
-    const solicitanteUsuarioId = req.auth?.usuarioId;
-
-    if (!solicitanteUsuarioId) {
-      throw new HttpError(401, 'Sessão não autenticada.');
-    }
+    const solicitanteUsuarioId = idUsuario(req);
 
     const corpo = req.body ?? {};
 

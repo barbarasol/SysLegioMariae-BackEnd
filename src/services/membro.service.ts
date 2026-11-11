@@ -1,6 +1,7 @@
 import { QueryTypes } from 'sequelize';
 import { sequelize } from '../config/database.js';
 import { HttpError } from '../utils/http-error.js';
+import { obterUnidadesPermitidasMembros, garantirPraesidiumPermitido } from './membro-acesso.service.js';
 
 type CategoriaRow = {
   id: number;
@@ -38,7 +39,8 @@ export type CatalogosMembro = {
  * Categorias, cargos e unidades numa única chamada — alimenta todos
  * os selects do formulário de membro sem três requisições.
  */
-export async function catalogos(): Promise<CatalogosMembro> {
+export async function catalogos(usuarioId: string): Promise<CatalogosMembro> {
+  const unidadesPermitidas = await obterUnidadesPermitidasMembros(usuarioId);
 
   const categorias = await sequelize.query<{
     codigo: string;
@@ -86,15 +88,22 @@ export async function catalogos(): Promise<CatalogosMembro> {
         ul.id::text,
         ul.nome,
         tu.codigo   AS tipo,
-        ul.cidade,
-        ul.estado_regiao AS "estadoRegiao"
+        municipio.nome AS cidade,
+        uf.sigla AS "estadoRegiao"
       FROM legio.unidade_legionaria ul
       JOIN legio.tipo_unidade tu
         ON tu.id = ul.tipo_unidade_id
+      LEFT JOIN legio.municipio municipio
+        ON municipio.id = ul.municipio_id
+      LEFT JOIN legio.uf uf
+        ON uf.id = municipio.id_uf
       WHERE ul.ativo = TRUE
-      ORDER BY tu.ordem_hierarquica NULLS LAST, ul.nome
+        AND tu.codigo = 'PRAESIDIUM'
+        AND ul.id::text IN (:unidadesPermitidas)
+      ORDER BY ul.nome
     `,
     {
+      replacements: { unidadesPermitidas },
       type: QueryTypes.SELECT
     }
   );
@@ -156,9 +165,10 @@ const STATUS_MEMBRO_PERMITIDOS = [
  * e o cargo ativo — tudo já resolvido para a tabela.
  */
 export async function listar(
+  usuarioId: string,
   filtros: FiltrosMembros = {}
 ): Promise<MembroListado[]> {
-
+  const unidadesPermitidas = await obterUnidadesPermitidasMembros(usuarioId);
   const busca = texto(filtros.busca);
   const status = texto(filtros.status)?.toUpperCase() ?? null;
   const unidadeId = texto(filtros.unidadeId);
@@ -167,30 +177,32 @@ export async function listar(
   if (status && !STATUS_MEMBRO_PERMITIDOS.includes(status)) {
     throw new HttpError(400, 'Informe um status de membro válido.');
   }
-
-  if (unidadeId && !/^\d+$/.test(unidadeId)) {
-    throw new HttpError(400, 'Informe uma unidade válida.');
+  if (unidadeId) {
+    garantirPraesidiumPermitido(unidadeId, unidadesPermitidas);
   }
 
+  // O JOIN LATERAL escolhe somente vínculos DENTRO dos Praesidia
+  // explicitamente autorizados. Não expõe o vínculo principal de
+  // outra unidade ao operador, nem cargos ou totais fora de seu escopo.
   return sequelize.query<MembroListado>(
     `
       SELECT
         m.id::text,
         p.nome,
-        p.nome_preferido              AS "nomePreferido",
+        p.nome_preferido AS "nomePreferido",
         p.cpf,
         p.email,
         p.celular,
         m.status,
-        cat.codigo                    AS categoria,
-        cat.nome                      AS "categoriaNome",
-        ul.id::text                   AS "unidadeId",
-        ul.nome                       AS "unidadeNome",
-        tu.codigo                     AS "unidadeTipo",
-        cargo.codigo                  AS cargo,
-        cargo.nome                    AS "cargoNome",
-        m.dt_ingresso                 AS "dtIngresso",
-        m.dt_compromisso              AS "dtCompromisso",
+        cat.codigo AS categoria,
+        cat.nome AS "categoriaNome",
+        ul.id::text AS "unidadeId",
+        ul.nome AS "unidadeNome",
+        tu.codigo AS "unidadeTipo",
+        cargo.codigo AS cargo,
+        cargo.nome AS "cargoNome",
+        m.dt_ingresso AS "dtIngresso",
+        m.dt_compromisso AS "dtCompromisso",
         m.pretoriano,
         m.adjutor,
         m.mesc,
@@ -198,131 +210,111 @@ export async function listar(
         m.coroinha,
         (
           SELECT count(*)
-            FROM legio.membro_unidade mu2
-           WHERE mu2.membro_id = m.id
-             AND mu2.ativo = TRUE
-        )::int                        AS "totalUnidades"
+          FROM legio.membro_unidade mu2
+          WHERE mu2.membro_id = m.id
+            AND mu2.ativo = TRUE
+            AND mu2.unidade_id::text IN (:unidadesPermitidas)
+            AND (
+              CAST(:unidadeId AS bigint) IS NULL
+              OR mu2.unidade_id = CAST(:unidadeId AS bigint)
+            )
+        )::int AS "totalUnidades"
       FROM legio.membro m
       JOIN legio.pessoa p
         ON p.id = m.pessoa_id
-
-      -- Vínculo principal (o mais recente quando houver mais de um)
-      LEFT JOIN LATERAL (
-        SELECT
-          mu.unidade_id,
-          mu.categoria_membro_id
+      JOIN LATERAL (
+        SELECT mu.unidade_id, mu.categoria_membro_id
         FROM legio.membro_unidade mu
         WHERE mu.membro_id = m.id
           AND mu.ativo = TRUE
-        ORDER BY mu.principal DESC, mu.data_inicio DESC NULLS LAST
+          AND mu.unidade_id::text IN (:unidadesPermitidas)
+          AND (
+            CAST(:unidadeId AS bigint) IS NULL
+            OR mu.unidade_id = CAST(:unidadeId AS bigint)
+          )
+        ORDER BY mu.principal DESC, mu.data_inicio DESC NULLS LAST, mu.id DESC
         LIMIT 1
       ) vinculo ON TRUE
-
+      JOIN legio.unidade_legionaria ul
+        ON ul.id = vinculo.unidade_id
+       AND ul.ativo = TRUE
+      JOIN legio.tipo_unidade tu
+        ON tu.id = ul.tipo_unidade_id
+       AND tu.codigo = 'PRAESIDIUM'
       LEFT JOIN legio.categoria_membro cat
         ON cat.id = vinculo.categoria_membro_id
-
-      LEFT JOIN legio.unidade_legionaria ul
-        ON ul.id = vinculo.unidade_id
-
-      LEFT JOIN legio.tipo_unidade tu
-        ON tu.id = ul.tipo_unidade_id
-
-      -- Cargo ativo na unidade do vínculo
       LEFT JOIN LATERAL (
-        SELECT
-          cl.codigo,
-          cl.nome
+        SELECT cl.codigo, cl.nome
         FROM legio.membro_cargo_unidade mcu
         JOIN legio.cargo_legionario cl
           ON cl.id = mcu.cargo_id
         WHERE mcu.membro_id = m.id
+          AND mcu.unidade_id = vinculo.unidade_id
           AND mcu.ativo = TRUE
-          AND (
-                CAST(:unidadeIdFiltro AS bigint) IS NULL
-                OR mcu.unidade_id =
-                   CAST(:unidadeIdFiltro AS bigint)
-              )
         ORDER BY mcu.data_inicio DESC NULLS LAST
         LIMIT 1
       ) cargo ON TRUE
-
       WHERE (
-              CAST(:busca AS varchar) IS NULL
-              OR p.nome ILIKE '%' || CAST(:busca AS varchar) || '%'
-              OR p.nome_preferido ILIKE '%' || CAST(:busca AS varchar) || '%'
-              OR p.cpf ILIKE '%' || CAST(:busca AS varchar) || '%'
-              OR p.email ILIKE '%' || CAST(:busca AS varchar) || '%'
-            )
-        AND (
-              CAST(:status AS varchar) IS NULL
-              OR m.status = CAST(:status AS varchar)
-            )
-        AND (
-              CAST(:categoria AS varchar) IS NULL
-              OR cat.codigo = CAST(:categoria AS varchar)
-            )
-        AND (
-              CAST(:unidadeId AS bigint) IS NULL
-              OR vinculo.unidade_id = CAST(:unidadeId AS bigint)
-            )
+        CAST(:busca AS varchar) IS NULL
+        OR p.nome ILIKE '%' || CAST(:busca AS varchar) || '%'
+        OR p.nome_preferido ILIKE '%' || CAST(:busca AS varchar) || '%'
+        OR p.cpf ILIKE '%' || CAST(:busca AS varchar) || '%'
+        OR p.email ILIKE '%' || CAST(:busca AS varchar) || '%'
+      )
+      AND (
+        CAST(:status AS varchar) IS NULL
+        OR m.status = CAST(:status AS varchar)
+      )
+      AND (
+        CAST(:categoria AS varchar) IS NULL
+        OR cat.codigo = CAST(:categoria AS varchar)
+      )
       ORDER BY p.nome
     `,
     {
-      replacements: {
-        busca,
-        status,
-        categoria,
-        unidadeId,
-        unidadeIdFiltro: unidadeId
-      },
+      replacements: { busca, status, categoria, unidadeId, unidadesPermitidas },
       type: QueryTypes.SELECT
     }
   );
 }
 
-export async function resumo(): Promise<ResumoMembros> {
+/** Resumo restrito a membros com vínculo ativo em Praesidium autorizado. */
+export async function resumo(usuarioId: string): Promise<ResumoMembros> {
+  const unidadesPermitidas = await obterUnidadesPermitidasMembros(usuarioId);
 
-  const linhas = await sequelize.query<{
-    status: string;
-    total: string;
-  }>(
+  const linhas = await sequelize.query<{ status: string; total: string }>(
     `
-      SELECT
-        status,
-        count(*)::text AS total
-      FROM legio.membro
-      GROUP BY status
+      SELECT m.status, COUNT(DISTINCT m.id)::text AS total
+      FROM legio.membro m
+      JOIN legio.membro_unidade mu
+        ON mu.membro_id = m.id
+       AND mu.ativo = TRUE
+      JOIN legio.unidade_legionaria ul
+        ON ul.id = mu.unidade_id
+       AND ul.ativo = TRUE
+      JOIN legio.tipo_unidade tu
+        ON tu.id = ul.tipo_unidade_id
+       AND tu.codigo = 'PRAESIDIUM'
+      WHERE mu.unidade_id::text IN (:unidadesPermitidas)
+      GROUP BY m.status
     `,
     {
+      replacements: { unidadesPermitidas },
       type: QueryTypes.SELECT
     }
   );
 
   const resultado: ResumoMembros = {
-    total: 0,
-    ativos: 0,
-    inativos: 0,
-    falecidos: 0
+    total: 0, ativos: 0, inativos: 0, falecidos: 0
   };
 
   for (const linha of linhas) {
-    const total = Number(linha.total);
-
-    resultado.total += total;
-
-    if (linha.status === 'ATIVO') {
-      resultado.ativos = total;
-    }
-
-    if (linha.status === 'INATIVO') {
-      resultado.inativos = total;
-    }
-
-    if (linha.status === 'FALECIDO') {
-      resultado.falecidos = total;
-    }
+    const quantidade = Number(linha.total);
+    resultado.total += quantidade;
+    if (linha.status === 'ATIVO') resultado.ativos = quantidade;
+    if (linha.status === 'INATIVO') resultado.inativos = quantidade;
+    if (linha.status === 'FALECIDO') resultado.falecidos = quantidade;
   }
-
   return resultado;
 }
 
@@ -529,6 +521,12 @@ export async function criar(
     throw new HttpError(400, 'Selecione a categoria do membro.');
   }
 
+  // A autorização não usa a hierarquia dos conselhos; apenas vínculo direto.
+  garantirPraesidiumPermitido(
+    unidadeId,
+    await obterUnidadesPermitidasMembros(input.solicitanteUsuarioId)
+  );
+
   const categoria = await resolverCategoria(categoriaCodigo);
   const cargo = await resolverCargo(
     texto(input.cargoCodigo)?.toUpperCase() ?? null
@@ -563,6 +561,11 @@ export async function criar(
   }
 
   return sequelize.transaction(async (transaction) => {
+    // Revalida dentro da transação antes de qualquer INSERT.
+    garantirPraesidiumPermitido(
+      unidadeId,
+      await obterUnidadesPermitidasMembros(input.solicitanteUsuarioId, transaction)
+    );
 
     const pessoas = await sequelize.query<{
       id: string;
