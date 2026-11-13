@@ -3,7 +3,9 @@ import {
   catalogos,
   criar,
   listar,
-  resumo
+  resumo,
+  meuCadastro,
+  atualizarMeuCadastro
 } from '../controllers/membro.controller.js';
 import {
   authMiddleware
@@ -18,6 +20,10 @@ router.get('/', listar);
 router.get('/resumo', resumo);
 
 router.get('/catalogos', catalogos);
+
+router.get('/me', meuCadastro);
+
+router.patch('/me', atualizarMeuCadastro);
 
 router.post('/', criar);
 

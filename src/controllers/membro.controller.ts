@@ -140,3 +140,26 @@ export async function criar(
     next(error);
   }
 }
+
+
+/** GET /api/membros/me — somente o próprio registro do usuário autenticado. */
+export async function meuCadastro(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    res.json(await membroService.meuCadastro(idUsuario(req)));
+  } catch (error) { next(error); }
+}
+
+/** PATCH /api/membros/me — campos pessoais explicitamente autorizados. */
+export async function atualizarMeuCadastro(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    res.json(await membroService.atualizarMeuCadastro(idUsuario(req), req.body));
+  } catch (error) { next(error); }
+}
