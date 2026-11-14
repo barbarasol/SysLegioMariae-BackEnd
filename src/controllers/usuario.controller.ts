@@ -116,6 +116,24 @@ function exigirAutenticacao(
   );
 }
 
+export async function catalogosCadastro(
+  _req: AuthenticatedRequest, res: Response, next: NextFunction
+): Promise<void> {
+  try { res.status(200).json(await usuarioService.catalogosCadastro()); }
+  catch (error) { next(error); }
+}
+
+export async function aprovarSolicitacao(
+  req: AuthenticatedRequest, res: Response, next: NextFunction
+): Promise<void> {
+  try {
+    const aprovadorId = exigirAutenticacao(req);
+    const usuarioId = obterIdParametro(req.params.id);
+    await usuarioService.aprovarSolicitacao(usuarioId, aprovadorId, req.body ?? {});
+    res.json({ message: 'Solicitação aprovada e usuário ativado.' });
+  } catch (error) { next(error); }
+}
+
 export async function listarPerfisGlobais(
   req: AuthenticatedRequest,
   res: Response,
@@ -571,7 +589,9 @@ export async function cadastroPublico(
       senha,
       nomePreferido,
       cpf,
-      celular
+      celular,
+      unidadeSolicitadaId,
+      perfilSolicitadoCodigo
     } = req.body ?? {};
 
     const resultado =
@@ -581,7 +601,9 @@ export async function cadastroPublico(
         senha,
         nomePreferido,
         cpf,
-        celular
+        celular,
+        unidadeSolicitadaId,
+        perfilSolicitadoCodigo
       });
 
     res.status(201).json(
@@ -608,7 +630,9 @@ export async function criar(
       senha,
       nomePreferido,
       cpf,
-      celular
+      celular,
+      unidadeSolicitadaId,
+      perfilSolicitadoCodigo
     } = req.body ?? {};
 
     const resultado =
@@ -618,7 +642,9 @@ export async function criar(
         senha,
         nomePreferido,
         cpf,
-        celular
+        celular,
+        unidadeSolicitadaId,
+        perfilSolicitadoCodigo
       });
 
     res.status(201).json(

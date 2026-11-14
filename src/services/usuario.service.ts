@@ -25,6 +25,10 @@ type UsuarioBaseRow = {
   email: string;
   status: string;
   perfis_globais: string[];
+  solicitacao_unidade_id: string | null;
+  solicitacao_unidade_nome: string | null;
+  solicitacao_perfil_codigo: string | null;
+  solicitacao_status: string | null;
 };
 
 export type CriarUsuarioInput = {
@@ -34,6 +38,8 @@ export type CriarUsuarioInput = {
   nomePreferido?: string | null;
   cpf?: string | null;
   celular?: string | null;
+  unidadeSolicitadaId?: string | null;
+  perfilSolicitadoCodigo?: string | null;
 };
 
 export type AtualizarUsuarioInput = {
@@ -81,6 +87,10 @@ export type UsuarioLista = {
   email: string;
   status: string;
   perfisGlobais: string[];
+  solicitacaoUnidadeId: string | null;
+  solicitacaoUnidadeNome: string | null;
+  solicitacaoPerfilCodigo: string | null;
+  solicitacaoStatus: string | null;
 };
 
 export type PerfilAcessoGlobal = {
@@ -461,6 +471,34 @@ async function garantirUnidadePodeReceberAcesso(
   }
 }
 
+async function autorEhAdministradorPlataforma(usuarioId: string, transaction?: Transaction): Promise<boolean> {
+  const [resultado] = await sequelize.query<{ permitido: boolean }>(
+    `SELECT EXISTS (
+       SELECT 1 FROM legio.usuario u
+       JOIN legio.usuario_perfil_global upg ON upg.usuario_id = u.id
+       JOIN legio.perfil_acesso pa ON pa.id = upg.perfil_id
+       WHERE u.id = CAST(:usuarioId AS bigint) AND u.status = 'ATIVO'
+         AND pa.codigo IN ('PLATFORM_OWNER', 'PLATFORM_ADMIN') AND pa.escopo = 'GLOBAL' AND pa.ativo = TRUE
+     ) AS permitido`,
+    { replacements: { usuarioId }, type: QueryTypes.SELECT, transaction }
+  );
+  return resultado?.permitido === true;
+}
+
+async function garantirPerfilMembroSomentePraesidium(
+  unidadeId: string, transaction?: Transaction
+): Promise<void> {
+  const [unidade] = await sequelize.query<{ codigo: string }>(
+    `SELECT tu.codigo FROM legio.unidade_legionaria ul
+     JOIN legio.tipo_unidade tu ON tu.id = ul.tipo_unidade_id
+     WHERE ul.id = CAST(:unidadeId AS bigint) LIMIT 1`,
+    { replacements: { unidadeId }, type: QueryTypes.SELECT, transaction }
+  );
+  if (unidade?.codigo !== 'PRAESIDIUM') {
+    throw new HttpError(400, 'O perfil MEMBRO somente pode ser concedido a um Praesidium.');
+  }
+}
+
 async function garantirMembroNaUnidade(
   usuarioId: string,
   unidadeId: string,
@@ -680,12 +718,18 @@ async function buscarUsuario(
               ORDER BY pa.codigo
             ),
             ARRAY[]::text[]
-          ) AS perfis_globais
+          ) AS perfis_globais,
+          sac.unidade_id::text AS solicitacao_unidade_id,
+          ul_sac.nome AS solicitacao_unidade_nome,
+          sac.perfil_codigo AS solicitacao_perfil_codigo,
+          sac.status AS solicitacao_status
 
         FROM legio.usuario u
 
         INNER JOIN legio.pessoa p
           ON p.id = u.pessoa_id
+        LEFT JOIN legio.usuario_solicitacao_acesso sac ON sac.usuario_id = u.id
+        LEFT JOIN legio.unidade_legionaria ul_sac ON ul_sac.id = sac.unidade_id
 
         WHERE u.id = :usuarioId
 
@@ -809,8 +853,37 @@ function mapearUsuario(
     email: usuario.email,
     status: usuario.status,
     perfisGlobais:
-      usuario.perfis_globais ?? []
+      usuario.perfis_globais ?? [],
+    solicitacaoUnidadeId: usuario.solicitacao_unidade_id,
+    solicitacaoUnidadeNome: usuario.solicitacao_unidade_nome,
+    solicitacaoPerfilCodigo: usuario.solicitacao_perfil_codigo,
+    solicitacaoStatus: usuario.solicitacao_status
   };
+}
+
+/** Catálogo público restrito, sem dados pessoais ou permissões globais. */
+export async function catalogosCadastro() {
+  const [unidades, perfis] = await Promise.all([
+    sequelize.query<{ id: string; nome: string; tipoCodigo: string; statusAprovacao: string }>(
+      `SELECT ul.id::text AS id, ul.nome, ul.nome_reduzido AS "nomeReduzido",
+              tu.codigo AS "tipoCodigo", tu.nome AS "tipoNome",
+              ul.status_aprovacao AS "statusAprovacao"
+       FROM legio.unidade_legionaria ul
+       JOIN legio.tipo_unidade tu ON tu.id = ul.tipo_unidade_id
+       WHERE ul.ativo = TRUE AND ul.status_aprovacao = 'APROVADA'
+       ORDER BY tu.ordem_hierarquica NULLS LAST, ul.nome`,
+      { type: QueryTypes.SELECT }
+    ),
+    sequelize.query<{ codigo: string; nome: string }>(
+      `SELECT id::text AS id, codigo, nome, descricao FROM legio.perfil_acesso
+       WHERE ativo = TRUE AND escopo = 'UNIDADE'
+         AND codigo IN ('MEMBRO', 'CONSULTA', 'OPERADOR', 'ADMIN_UNIDADE')
+       ORDER BY CASE codigo WHEN 'MEMBRO' THEN 1 WHEN 'CONSULTA' THEN 2
+                    WHEN 'OPERADOR' THEN 3 ELSE 4 END`,
+      { type: QueryTypes.SELECT }
+    )
+  ]);
+  return { unidades, perfis };
 }
 
 export async function listarPerfisGlobais():
@@ -1019,6 +1092,88 @@ export async function listarAcessosUnidade(
   );
 }
 
+/** Aprova solicitação em uma transação: conta + perfil + auditoria. */
+export async function aprovarSolicitacao(
+  usuarioId: string, aprovadorId: string, input: { unidadeId?: unknown; perfilCodigo?: unknown }
+): Promise<void> {
+  if (!/^[1-9]\d*$/.test(usuarioId)) throw new HttpError(400, 'Usuário inválido.');
+  await sequelize.transaction(async (transaction) => {
+    if (!(await autorEhAdministradorPlataforma(aprovadorId, transaction))) {
+      throw new HttpError(403, 'Aprovação exclusiva dos administradores da plataforma.');
+    }
+    const [solicitacao] = await sequelize.query<{
+      unidade_id: string; perfil_codigo: string; status: string
+    }>(
+      `SELECT unidade_id::text, perfil_codigo, status
+       FROM legio.usuario_solicitacao_acesso
+       WHERE usuario_id = CAST(:usuarioId AS bigint) FOR UPDATE`,
+      { replacements: { usuarioId }, type: QueryTypes.SELECT, transaction }
+    );
+    if (!solicitacao || solicitacao.status !== 'PENDENTE') {
+      throw new HttpError(409, 'Não existe solicitação pendente para este usuário.');
+    }
+    const unidadeId = String(input.unidadeId ?? solicitacao.unidade_id).trim();
+    const perfilCodigo = String(input.perfilCodigo ?? solicitacao.perfil_codigo).trim().toUpperCase();
+    if (!/^[1-9]\d*$/.test(unidadeId) ||
+        !['MEMBRO', 'CONSULTA', 'OPERADOR', 'ADMIN_UNIDADE'].includes(perfilCodigo)) {
+      throw new HttpError(400, 'Unidade ou perfil inválido para aprovação.');
+    }
+    await garantirUnidadePodeReceberAcesso(unidadeId, transaction);
+    if (perfilCodigo === 'MEMBRO') await garantirPerfilMembroSomentePraesidium(unidadeId, transaction);
+    const perfil = await resolverPerfilUnidade(perfilCodigo, transaction);
+    await sequelize.query(
+      `INSERT INTO legio.usuario_unidade_perfil
+         (usuario_id, unidade_id, perfil_id, ativo, concedido_por, concedido_em, revogado_em, observacao)
+       VALUES (CAST(:usuarioId AS bigint), CAST(:unidadeId AS bigint),
+               CAST(:perfilId AS bigint), TRUE, CAST(:aprovadorId AS bigint), CURRENT_TIMESTAMP, NULL,
+               'Aprovado no cadastro inicial')
+       ON CONFLICT (usuario_id, unidade_id, perfil_id)
+       DO UPDATE SET ativo = TRUE, concedido_por = EXCLUDED.concedido_por,
+                     concedido_em = CURRENT_TIMESTAMP, revogado_em = NULL,
+                     observacao = EXCLUDED.observacao`,
+      { replacements: { usuarioId, unidadeId, perfilId: perfil.id, aprovadorId }, transaction }
+    );
+    await sequelize.query(
+      `UPDATE legio.usuario SET status = 'ATIVO' WHERE id = CAST(:usuarioId AS bigint)`,
+      { replacements: { usuarioId }, transaction }
+    );
+    await sequelize.query(
+      `UPDATE legio.usuario_solicitacao_acesso
+       SET unidade_id = CAST(:unidadeId AS bigint), perfil_codigo = :perfilCodigo,
+           status = 'APROVADA', analisado_por = CAST(:aprovadorId AS bigint),
+           analisado_em = CURRENT_TIMESTAMP
+       WHERE usuario_id = CAST(:usuarioId AS bigint)`,
+      { replacements: { usuarioId, unidadeId, perfilCodigo, aprovadorId }, transaction }
+    );
+    await sequelize.query(
+      `INSERT INTO legio.auditoria_evento
+         (usuario_id, unidade_id, acao, entidade, entidade_id, dados_depois)
+       VALUES (CAST(:aprovadorId AS bigint), CAST(:unidadeId AS bigint),
+               'USUARIO_SOLICITACAO_APROVADA', 'legio.usuario',
+               CAST(:usuarioId AS bigint), CAST(:detalhes AS jsonb))`,
+      { replacements: { aprovadorId, unidadeId, usuarioId,
+        detalhes: JSON.stringify({ unidadeId, perfilCodigo, solicitacaoInicial: solicitacao }) }, transaction }
+    );
+  });
+}
+
+/** Cadastro legado: registra aprovação de MEMBRO feita diretamente pelo owner. */
+async function sincronizarMembroAutorizado(
+  usuarioId: string, unidadeId: string, aprovadorId: string, transaction: Transaction
+): Promise<void> {
+  await sequelize.query(
+    `INSERT INTO legio.usuario_solicitacao_acesso
+       (usuario_id, unidade_id, perfil_codigo, status, analisado_por, analisado_em)
+     VALUES (CAST(:usuarioId AS bigint), CAST(:unidadeId AS bigint), 'MEMBRO',
+             'APROVADA', CAST(:aprovadorId AS bigint), CURRENT_TIMESTAMP)
+     ON CONFLICT (usuario_id) DO UPDATE
+       SET unidade_id = EXCLUDED.unidade_id, perfil_codigo = 'MEMBRO',
+           status = 'APROVADA', analisado_por = EXCLUDED.analisado_por,
+           analisado_em = CURRENT_TIMESTAMP`,
+    { replacements: { usuarioId, unidadeId, aprovadorId }, transaction }
+  );
+}
+
 export async function adicionarAcessoUnidade(
   usuarioId: string,
   input: SalvarAcessoUnidadeInput,
@@ -1064,11 +1219,10 @@ export async function adicionarAcessoUnidade(
       if (
         perfil.codigo === 'MEMBRO'
       ) {
-        await garantirMembroNaUnidade(
-          usuarioId,
-          unidadeId,
-          transaction
-        );
+        await garantirPerfilMembroSomentePraesidium(unidadeId, transaction);
+        if (!(await autorEhAdministradorPlataforma(concedidoPorUsuarioId, transaction))) {
+          await garantirMembroNaUnidade(usuarioId, unidadeId, transaction);
+        }
       }
 
       const antes =
@@ -1129,6 +1283,10 @@ export async function adicionarAcessoUnidade(
           transaction
         }
       );
+
+      if (perfil.codigo === 'MEMBRO') {
+        await sincronizarMembroAutorizado(usuarioId, unidadeId, concedidoPorUsuarioId, transaction);
+      }
 
       const depois =
         await buscarAcessoUnidadeAtivo(
@@ -1224,11 +1382,10 @@ export async function alterarAcessoUnidade(
       if (
         novoPerfil.codigo === 'MEMBRO'
       ) {
-        await garantirMembroNaUnidade(
-          usuarioId,
-          novaUnidadeId,
-          transaction
-        );
+        await garantirPerfilMembroSomentePraesidium(novaUnidadeId, transaction);
+        if (!(await autorEhAdministradorPlataforma(concedidoPorUsuarioId, transaction))) {
+          await garantirMembroNaUnidade(usuarioId, novaUnidadeId, transaction);
+        }
       }
 
       await sequelize.query(
@@ -1307,6 +1464,10 @@ export async function alterarAcessoUnidade(
           transaction
         }
       );
+
+      if (novoPerfil.codigo === 'MEMBRO') {
+        await sincronizarMembroAutorizado(usuarioId, novaUnidadeId, concedidoPorUsuarioId, transaction);
+      }
 
       const depois =
         await buscarAcessoUnidadeAtivo(
@@ -1473,12 +1634,18 @@ export async function listar(
               ORDER BY pa.codigo
             ),
             ARRAY[]::text[]
-          ) AS perfis_globais
+          ) AS perfis_globais,
+          sac.unidade_id::text AS solicitacao_unidade_id,
+          ul_sac.nome AS solicitacao_unidade_nome,
+          sac.perfil_codigo AS solicitacao_perfil_codigo,
+          sac.status AS solicitacao_status
 
         FROM legio.usuario u
 
         INNER JOIN legio.pessoa p
           ON p.id = u.pessoa_id
+        LEFT JOIN legio.usuario_solicitacao_acesso sac ON sac.usuario_id = u.id
+        LEFT JOIN legio.unidade_legionaria ul_sac ON ul_sac.id = sac.unidade_id
 
         WHERE
           u.status <> 'INATIVO'
@@ -2017,6 +2184,13 @@ export async function criar(
       input.celular
     );
 
+  const unidadeSolicitadaId = String(input.unidadeSolicitadaId ?? '').trim();
+  const perfilSolicitadoCodigo = String(input.perfilSolicitadoCodigo ?? '').trim().toUpperCase();
+  if (!/^[1-9]\d*$/.test(unidadeSolicitadaId) ||
+      !['MEMBRO', 'CONSULTA', 'OPERADOR', 'ADMIN_UNIDADE'].includes(perfilSolicitadoCodigo)) {
+    throw new HttpError(400, 'Selecione a unidade e o perfil que deseja solicitar.');
+  }
+
   // O novo usuário permanece PENDENTE_EMAIL e sem qualquer perfil.
   // Esta operação NÃO cria membro, NÃO altera pessoa já cadastrada
   // e NÃO concede automaticamente acesso a unidades.
@@ -2050,6 +2224,23 @@ export async function criar(
           'Já existe um usuário cadastrado com este e-mail.'
         );
       }
+
+      const [unidadeSolicitada] = await sequelize.query<{ tipo: string }>(
+        `SELECT tu.codigo AS tipo FROM legio.unidade_legionaria ul
+         JOIN legio.tipo_unidade tu ON tu.id = ul.tipo_unidade_id
+         WHERE ul.id = CAST(:unidadeId AS bigint)
+           AND ul.ativo = TRUE AND ul.status_aprovacao = 'APROVADA' LIMIT 1`,
+        { replacements: { unidadeId: unidadeSolicitadaId }, type: QueryTypes.SELECT, transaction }
+      );
+      if (!unidadeSolicitada || (perfilSolicitadoCodigo === 'MEMBRO' && unidadeSolicitada.tipo !== 'PRAESIDIUM')) {
+        throw new HttpError(400, 'Unidade indisponível ou perfil incompatível. MEMBRO requer Praesidium.');
+      }
+      const [perfilSolicitado] = await sequelize.query<{ codigo: string }>(
+        `SELECT codigo FROM legio.perfil_acesso
+         WHERE codigo = :codigo AND escopo = 'UNIDADE' AND ativo = TRUE LIMIT 1`,
+        { replacements: { codigo: perfilSolicitadoCodigo }, type: QueryTypes.SELECT, transaction }
+      );
+      if (!perfilSolicitado) throw new HttpError(400, 'Perfil solicitado indisponível.');
 
       type PessoaCadastroRow = {
         id: string;
@@ -2226,6 +2417,14 @@ export async function criar(
         );
       }
 
+      await sequelize.query(
+        `INSERT INTO legio.usuario_solicitacao_acesso
+           (usuario_id, unidade_id, perfil_codigo, status)
+         VALUES (CAST(:usuarioId AS bigint), CAST(:unidadeId AS bigint), :perfilCodigo, 'PENDENTE')`,
+        { replacements: { usuarioId: usuario.id, unidadeId: unidadeSolicitadaId,
+                          perfilCodigo: perfilSolicitadoCodigo }, transaction }
+      );
+
       // Não inserir em membro, usuario_perfil_global ou
       // usuario_unidade_perfil. Acesso só após validação administrativa.
       await sequelize.query(
@@ -2256,7 +2455,9 @@ export async function criar(
               pessoaId: pessoa.id,
               pessoaReutilizada,
               status: STATUS_CADASTRO_INICIAL,
-              perfisGlobais: []
+              perfisGlobais: [],
+              unidadeSolicitadaId,
+              perfilSolicitadoCodigo
             })
           },
           transaction

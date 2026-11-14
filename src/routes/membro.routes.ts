@@ -5,7 +5,9 @@ import {
   listar,
   resumo,
   meuCadastro,
-  atualizarMeuCadastro
+  atualizarMeuCadastro,
+  listarPendentes,
+  validarPendente
 } from '../controllers/membro.controller.js';
 import {
   authMiddleware
@@ -20,6 +22,10 @@ router.get('/', listar);
 router.get('/resumo', resumo);
 
 router.get('/catalogos', catalogos);
+
+// Rotas fixas antes das parametrizadas. Validação de acesso feita no service.
+router.get('/pendentes', listarPendentes);
+router.post('/pendentes/:usuarioId/validar', validarPendente);
 
 router.get('/me', meuCadastro);
 

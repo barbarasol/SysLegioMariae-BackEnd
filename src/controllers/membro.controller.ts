@@ -163,3 +163,25 @@ export async function atualizarMeuCadastro(
     res.json(await membroService.atualizarMeuCadastro(idUsuario(req), req.body));
   } catch (error) { next(error); }
 }
+
+
+/** GET /api/membros/pendentes — somente responsáveis diretos pelo Praesidium. */
+export async function listarPendentes(
+  req: AuthenticatedRequest, res: Response, next: NextFunction
+): Promise<void> {
+  try {
+    const unidadeId = queryString(req.query.unidadeId);
+    res.json(await membroService.listarMembrosPendentes(idUsuario(req), unidadeId));
+  } catch (error) { next(error); }
+}
+
+/** POST /api/membros/pendentes/:usuarioId/validar — cria vínculo institucional. */
+export async function validarPendente(
+  req: AuthenticatedRequest, res: Response, next: NextFunction
+): Promise<void> {
+  try {
+    res.json(await membroService.validarMembroPendente(
+      idUsuario(req), String(req.params.usuarioId ?? ''), req.body ?? {}
+    ));
+  } catch (error) { next(error); }
+}

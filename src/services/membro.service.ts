@@ -892,7 +892,7 @@ async function carregarMeuCadastroPorPessoa(
   const linhas = await sequelize.query<MeuCadastroMembro>(
     `
       SELECT
-        m.id::text,
+        COALESCE(m.id::text, '') AS id,
         p.nome,
         p.nome_preferido AS "nomePreferido",
         p.cpf,
@@ -901,18 +901,25 @@ async function carregarMeuCadastroPorPessoa(
         p.email,
         p.celular,
         p.telefone,
-        m.formacao_escolar AS "formacaoEscolar",
-        m.aposentado,
-        m.status,
+        COALESCE(m.formacao_escolar, sac.formacao_escolar) AS "formacaoEscolar",
+        COALESCE(m.aposentado, sac.aposentado, FALSE) AS aposentado,
+        COALESCE(m.status, 'PENDENTE_VINCULO') AS status,
         cat.nome AS categoria,
-        ul.nome AS "unidadeNome",
+        COALESCE(ul.nome, ul_acesso.nome) AS "unidadeNome",
         cargo.nome AS "cargoNome",
         to_char(m.dt_ingresso, 'YYYY-MM-DD') AS "dtIngresso",
         to_char(m.dt_compromisso, 'YYYY-MM-DD') AS "dtCompromisso",
-        m.pretoriano, m.adjutor, m.mesc, m.catequista, m.coroinha
+        COALESCE(m.pretoriano, FALSE) AS pretoriano,
+        COALESCE(m.adjutor, FALSE) AS adjutor,
+        COALESCE(m.mesc, FALSE) AS mesc,
+        COALESCE(m.catequista, FALSE) AS catequista,
+        COALESCE(m.coroinha, FALSE) AS coroinha
       FROM legio.usuario u
       JOIN legio.pessoa p ON p.id = u.pessoa_id
-      JOIN legio.membro m ON m.pessoa_id = p.id
+      LEFT JOIN legio.membro m ON m.pessoa_id = p.id
+      LEFT JOIN legio.usuario_solicitacao_acesso sac ON sac.usuario_id = u.id
+      LEFT JOIN legio.unidade_legionaria ul_acesso
+        ON ul_acesso.id = sac.unidade_id AND sac.status = 'APROVADA' 
       LEFT JOIN LATERAL (
         SELECT mu.unidade_id, mu.categoria_membro_id
         FROM legio.membro_unidade mu
@@ -1022,12 +1029,264 @@ export async function atualizarMeuCadastro(
           pessoaId, nome, nomePreferido, rg, dataNascimento, email, celular, telefone
         }, transaction }
     );
-    await sequelize.query(
-      `UPDATE legio.membro
-       SET formacao_escolar = :formacaoEscolar, aposentado = :aposentado
-       WHERE pessoa_id = CAST(:pessoaId AS bigint) AND id = CAST(:membroId AS bigint)`,
-      { replacements: { pessoaId, membroId: antes.id, formacaoEscolar, aposentado }, transaction }
-    );
+    if (antes.id) {
+      await sequelize.query(
+        `UPDATE legio.membro
+         SET formacao_escolar = :formacaoEscolar, aposentado = :aposentado
+         WHERE pessoa_id = CAST(:pessoaId AS bigint) AND id = CAST(:membroId AS bigint)`,
+        { replacements: { pessoaId, membroId: antes.id, formacaoEscolar, aposentado }, transaction }
+      );
+    } else {
+      // Até existir cadastro institucional, os dados não pertencentes a pessoa
+      // ficam em rascunho, vinculados exclusivamente ao próprio usuario.
+      await sequelize.query(
+        `UPDATE legio.usuario_solicitacao_acesso
+         SET formacao_escolar = :formacaoEscolar, aposentado = :aposentado
+         WHERE usuario_id = CAST(:usuarioId AS bigint) AND status = 'APROVADA'`,
+        { replacements: { usuarioId, formacaoEscolar, aposentado }, transaction }
+      );
+    }
     return carregarMeuCadastroPorPessoa(pessoaId, transaction);
+  });
+}
+
+
+/** Solicitações de MEMBRO já autorizadas, mas ainda sem vínculo legionário ativo. */
+export type MembroPendenteValidacao = {
+  usuarioId: string;
+  pessoaId: string;
+  membroId: string | null;
+  nome: string;
+  nomePreferido: string | null;
+  cpf: string | null;
+  email: string | null;
+  celular: string | null;
+  formacaoEscolar: string | null;
+  aposentado: boolean;
+  unidadeId: string;
+  unidadeNome: string;
+  autorizadoEm: string | null;
+};
+
+/** Nenhuma permissão herdada dos conselhos: somente Praesidia diretos e PLATFORM_OWNER. */
+export async function listarMembrosPendentes(
+  aprovadorId: string,
+  filtroUnidadeId?: string | null
+): Promise<MembroPendenteValidacao[]> {
+  const escopo = await obterEscopoMembros(aprovadorId);
+  if (escopo.somenteMeuCadastro || escopo.unidadesPermitidas.length === 0) {
+    throw new HttpError(403, 'Seu perfil não permite validar membros.');
+  }
+  const unidadeId = String(filtroUnidadeId ?? '').trim();
+  if (unidadeId) garantirPraesidiumPermitido(unidadeId, escopo.unidadesPermitidas);
+  const unidades = unidadeId ? [unidadeId] : escopo.unidadesPermitidas;
+
+  return sequelize.query<MembroPendenteValidacao>(
+    `SELECT
+       sac.usuario_id::text AS "usuarioId",
+       u.pessoa_id::text AS "pessoaId",
+       m.id::text AS "membroId",
+       p.nome,
+       p.nome_preferido AS "nomePreferido",
+       p.cpf, p.email, p.celular,
+       COALESCE(m.formacao_escolar, sac.formacao_escolar) AS "formacaoEscolar",
+       COALESCE(m.aposentado, sac.aposentado, FALSE) AS aposentado,
+       sac.unidade_id::text AS "unidadeId",
+       ul.nome AS "unidadeNome",
+       sac.analisado_em::text AS "autorizadoEm"
+     FROM legio.usuario_solicitacao_acesso sac
+     JOIN legio.usuario u ON u.id = sac.usuario_id
+     JOIN legio.pessoa p ON p.id = u.pessoa_id
+     JOIN legio.unidade_legionaria ul ON ul.id = sac.unidade_id AND ul.ativo = TRUE
+     JOIN legio.tipo_unidade tu ON tu.id = ul.tipo_unidade_id AND tu.codigo = 'PRAESIDIUM'
+     LEFT JOIN LATERAL (
+       SELECT m0.id, m0.formacao_escolar, m0.aposentado
+       FROM legio.membro m0 WHERE m0.pessoa_id = u.pessoa_id
+       ORDER BY m0.id DESC LIMIT 1
+     ) m ON TRUE
+     WHERE sac.status = 'APROVADA'
+       AND sac.perfil_codigo = 'MEMBRO'
+       AND u.status = 'ATIVO'
+       AND sac.unidade_id::text IN (:unidades)
+       AND EXISTS (
+         SELECT 1 FROM legio.usuario_unidade_perfil uup
+         JOIN legio.perfil_acesso pa ON pa.id = uup.perfil_id
+         WHERE uup.usuario_id = u.id
+           AND uup.unidade_id = sac.unidade_id
+           AND uup.ativo = TRUE AND uup.revogado_em IS NULL
+           AND pa.codigo = 'MEMBRO' AND pa.escopo = 'UNIDADE' AND pa.ativo = TRUE
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM legio.membro m_verificacao
+         JOIN legio.membro_unidade mu ON mu.membro_id = m_verificacao.id AND mu.ativo = TRUE
+         WHERE m_verificacao.pessoa_id = u.pessoa_id AND mu.unidade_id = sac.unidade_id
+       )
+     ORDER BY sac.analisado_em ASC NULLS LAST, p.nome`,
+    { replacements: { unidades }, type: QueryTypes.SELECT }
+  );
+}
+
+/** Categoria escolhida pelo responsável; só aceita opções Ativo/Auxiliar do catálogo real. */
+export type ValidarMembroPendenteInput = {
+  categoriaCodigo?: unknown;
+};
+
+export async function validarMembroPendente(
+  aprovadorId: string,
+  usuarioPendenteId: string,
+  input: ValidarMembroPendenteInput
+): Promise<{ membroId: string; unidadeId: string; categoriaCodigo: string; status: 'ATIVO' }> {
+  if (!/^[1-9]\d*$/.test(String(usuarioPendenteId ?? ''))) {
+    throw new HttpError(400, 'Identificador do usuário inválido.');
+  }
+  const categoriaCodigo = typeof input?.categoriaCodigo === 'string'
+    ? input.categoriaCodigo.trim().toUpperCase() : '';
+  if (!categoriaCodigo || categoriaCodigo.length > 80) {
+    throw new HttpError(400, 'Selecione a categoria Ativo ou Auxiliar.');
+  }
+
+  return sequelize.transaction(async (transaction) => {
+    // A linha da solicitação é bloqueada para impedir aprovação duplicada concorrente.
+    const solicitacoes = await sequelize.query<{
+      pessoaId: string; unidadeId: string; statusUsuario: string;
+      formacaoEscolar: string | null; aposentado: boolean | null;
+    }>(
+      `SELECT u.pessoa_id::text AS "pessoaId", sac.unidade_id::text AS "unidadeId",
+              u.status AS "statusUsuario", sac.formacao_escolar AS "formacaoEscolar",
+              sac.aposentado
+       FROM legio.usuario_solicitacao_acesso sac
+       JOIN legio.usuario u ON u.id = sac.usuario_id
+       WHERE sac.usuario_id = CAST(:usuarioId AS bigint)
+         AND sac.status = 'APROVADA' AND sac.perfil_codigo = 'MEMBRO'
+       FOR UPDATE OF sac`,
+      { replacements: { usuarioId: usuarioPendenteId }, type: QueryTypes.SELECT, transaction }
+    );
+    const solicitacao = solicitacoes[0];
+    if (!solicitacao || solicitacao.statusUsuario !== 'ATIVO') {
+      throw new HttpError(409, 'Não existe solicitação de membro aprovada e ativa para este usuário.');
+    }
+
+    const escopo = await obterEscopoMembros(aprovadorId, transaction);
+    if (escopo.somenteMeuCadastro) throw new HttpError(403, 'Sem autorização para validar membros.');
+    garantirPraesidiumPermitido(solicitacao.unidadeId, escopo.unidadesPermitidas);
+
+    // A concessão ao membro pode ter sido revogada depois da aprovação inicial.
+    const acessos = await sequelize.query<{ permitido: boolean }>(
+      `SELECT EXISTS (
+        SELECT 1 FROM legio.usuario_unidade_perfil uup
+        JOIN legio.perfil_acesso pa ON pa.id = uup.perfil_id
+        JOIN legio.unidade_legionaria ul ON ul.id = uup.unidade_id
+        JOIN legio.tipo_unidade tu ON tu.id = ul.tipo_unidade_id
+        WHERE uup.usuario_id = CAST(:usuarioId AS bigint)
+          AND uup.unidade_id = CAST(:unidadeId AS bigint)
+          AND uup.ativo = TRUE AND uup.revogado_em IS NULL
+          AND ul.ativo = TRUE AND tu.codigo = 'PRAESIDIUM'
+          AND pa.codigo = 'MEMBRO' AND pa.escopo = 'UNIDADE' AND pa.ativo = TRUE
+      ) AS permitido`,
+      { replacements: { usuarioId: usuarioPendenteId, unidadeId: solicitacao.unidadeId },
+        type: QueryTypes.SELECT, transaction }
+    );
+    if (!acessos[0]?.permitido) {
+      throw new HttpError(409, 'O usuário não possui mais autorização MEMBRO ativa neste Praesidium.');
+    }
+
+    const categorias = await sequelize.query<{ id: string; codigo: string; nome: string }>(
+      `SELECT id::text, codigo, nome FROM legio.categoria_membro
+       WHERE UPPER(codigo) = :codigo AND ativo = TRUE LIMIT 1`,
+      { replacements: { codigo: categoriaCodigo }, type: QueryTypes.SELECT, transaction }
+    );
+    const categoria = categorias[0];
+    if (!categoria || !/(^|[^A-Z])(ATIV[OA]S?|AUXILIAR(?:ES)?)(?=[^A-Z]|$)/.test(
+      `${categoria.codigo} ${categoria.nome}`.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase()
+    )) {
+      throw new HttpError(422, 'Escolha uma categoria Ativo ou Auxiliar válida no catálogo de membros.');
+    }
+
+    // Impede duplicidade mesmo se houver registros legados de membro para a mesma pessoa.
+    const vinculosExistentes = await sequelize.query<{ id: string }>(
+      `SELECT mu.id::text AS id FROM legio.membro m_antes
+       JOIN legio.membro_unidade mu ON mu.membro_id = m_antes.id
+       WHERE m_antes.pessoa_id = CAST(:pessoaId AS bigint)
+         AND mu.unidade_id = CAST(:unidadeId AS bigint) AND mu.ativo = TRUE
+       LIMIT 1`,
+      { replacements: { pessoaId: solicitacao.pessoaId, unidadeId: solicitacao.unidadeId },
+        type: QueryTypes.SELECT, transaction }
+    );
+    if (vinculosExistentes.length) {
+      throw new HttpError(409, 'Esta pessoa já possui vínculo legionário ativo neste Praesidium.');
+    }
+
+    const membros = await sequelize.query<{ id: string; status: string }>(
+      `SELECT id::text, status FROM legio.membro
+       WHERE pessoa_id = CAST(:pessoaId AS bigint) ORDER BY id DESC LIMIT 1 FOR UPDATE`,
+      { replacements: { pessoaId: solicitacao.pessoaId }, type: QueryTypes.SELECT, transaction }
+    );
+    let membroId = membros[0]?.id ?? null;
+    if (membros[0]?.status === 'FALECIDO') {
+      throw new HttpError(409, 'Cadastro de membro marcado como falecido. Necessária análise específica.');
+    }
+
+    if (membroId) {
+      const vinculos = await sequelize.query<{ id: string }>(
+        `SELECT id::text FROM legio.membro_unidade
+         WHERE membro_id = CAST(:membroId AS bigint)
+           AND unidade_id = CAST(:unidadeId AS bigint) AND ativo = TRUE
+         LIMIT 1`,
+        { replacements: { membroId, unidadeId: solicitacao.unidadeId },
+          type: QueryTypes.SELECT, transaction }
+      );
+      if (vinculos.length) {
+        throw new HttpError(409, 'Este membro já possui vínculo ativo com o Praesidium.');
+      }
+      await sequelize.query(
+        `UPDATE legio.membro SET status = 'ATIVO',
+           formacao_escolar = COALESCE(formacao_escolar, :formacaoEscolar),
+           aposentado = COALESCE(aposentado, :aposentado, FALSE)
+         WHERE id = CAST(:membroId AS bigint)`,
+        { replacements: { membroId, formacaoEscolar: solicitacao.formacaoEscolar,
+            aposentado: solicitacao.aposentado }, transaction }
+      );
+    } else {
+      const criados = await sequelize.query<{ id: string }>(
+        `INSERT INTO legio.membro
+         (pessoa_id, dt_recrutamento, dt_ingresso, dt_compromisso,
+          formacao_escolar, aposentado, pretoriano, adjutor, mesc, catequista, coroinha,
+          status, observacao)
+         VALUES (CAST(:pessoaId AS bigint), NULL, NULL, NULL,
+                 :formacaoEscolar, COALESCE(:aposentado, FALSE),
+                 FALSE, FALSE, FALSE, FALSE, FALSE, 'ATIVO', NULL)
+         RETURNING id::text`,
+        { replacements: { pessoaId: solicitacao.pessoaId,
+            formacaoEscolar: solicitacao.formacaoEscolar, aposentado: solicitacao.aposentado },
+          type: QueryTypes.SELECT, transaction }
+      );
+      membroId = criados[0].id;
+    }
+
+    await sequelize.query(
+      `INSERT INTO legio.membro_unidade
+       (membro_id, unidade_id, categoria_membro_id, principal, ativo, data_inicio)
+       VALUES (CAST(:membroId AS bigint), CAST(:unidadeId AS bigint), CAST(:categoriaId AS bigint),
+               NOT EXISTS (
+                 SELECT 1 FROM legio.membro_unidade
+                 WHERE membro_id = CAST(:membroId AS bigint) AND ativo = TRUE
+               ), TRUE, CURRENT_DATE)`,
+      { replacements: { membroId, unidadeId: solicitacao.unidadeId, categoriaId: categoria.id },
+        transaction }
+    );
+    await sequelize.query(
+      `INSERT INTO legio.auditoria_evento
+         (usuario_id, unidade_id, acao, entidade, entidade_id, dados_depois)
+       VALUES (CAST(:aprovadorId AS bigint), CAST(:unidadeId AS bigint),
+               'MEMBRO_VINCULO_VALIDADO', 'legio.membro', CAST(:membroId AS bigint),
+               CAST(:detalhes AS jsonb))`,
+      { replacements: { aprovadorId, unidadeId: solicitacao.unidadeId, membroId,
+          detalhes: JSON.stringify({ usuarioId: usuarioPendenteId,
+            pessoaId: solicitacao.pessoaId, categoriaCodigo: categoria.codigo,
+            status: 'ATIVO', origem: 'APROVACAO_MEMBRO_PENDENTE' }) },
+        transaction }
+    );
+    return { membroId: membroId!, unidadeId: solicitacao.unidadeId,
+      categoriaCodigo: categoria.codigo, status: 'ATIVO' as const };
   });
 }
