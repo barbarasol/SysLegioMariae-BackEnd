@@ -7,7 +7,9 @@ import {
   meuCadastro,
   atualizarMeuCadastro,
   listarPendentes,
-  validarPendente
+  validarPendente,
+  obterParaEdicao,
+  atualizarCadastro
 } from '../controllers/membro.controller.js';
 import {
   authMiddleware
@@ -32,5 +34,8 @@ router.get('/me', meuCadastro);
 router.patch('/me', atualizarMeuCadastro);
 
 router.post('/', criar);
+
+router.get('/:id', obterParaEdicao);
+router.patch('/:id', atualizarCadastro);
 
 export default router;

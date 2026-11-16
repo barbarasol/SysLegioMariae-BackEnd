@@ -6,6 +6,8 @@ import {
   adicionarAcessoUnidade,
   aprovarSolicitacao,
   catalogosCadastro,
+  localidadesCadastro,
+  subdivisoesCadastro,
   alterarAcessoUnidade,
   atualizar,
   cadastroPublico,
@@ -33,6 +35,8 @@ const router =
  * sem perfil global e sem perfil de unidade.
  */
 router.get('/catalogos-cadastro', catalogosCadastro);
+router.get('/localidades-cadastro', localidadesCadastro);
+router.get('/subdivisoes-cadastro', subdivisoesCadastro);
 
 router.post(
   '/cadastro',

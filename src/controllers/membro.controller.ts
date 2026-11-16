@@ -3,6 +3,7 @@ import type {
   Response
 } from 'express';
 import * as membroService from '../services/membro.service.js';
+import * as membroEdicaoService from '../services/membro-edicao.service.js';
 import type {
   AuthenticatedRequest
 } from '../middlewares/auth.middleware.js';
@@ -184,4 +185,16 @@ export async function validarPendente(
       idUsuario(req), String(req.params.usuarioId ?? ''), req.body ?? {}
     ));
   } catch (error) { next(error); }
+}
+
+/** GET /api/membros/:id — cadastro completo do vínculo autorizado. */
+export async function obterParaEdicao(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+  try { res.json(await membroEdicaoService.obterParaEdicao(idUsuario(req), req.params.id, queryString(req.query.unidadeId))); }
+  catch (error) { next(error); }
+}
+
+/** PATCH /api/membros/:id — atualização administrativa com auditoria. */
+export async function atualizarCadastro(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+  try { res.json(await membroEdicaoService.atualizarCadastro(idUsuario(req), req.params.id, req.body)); }
+  catch (error) { next(error); }
 }

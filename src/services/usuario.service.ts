@@ -38,6 +38,9 @@ export type CriarUsuarioInput = {
   nomePreferido?: string | null;
   cpf?: string | null;
   celular?: string | null;
+  paisId?: string | null; // somente filtro de localização, não persistido em pessoa
+  municipioId?: string | null;
+  subdivisaoLocalId?: string | null;
   unidadeSolicitadaId?: string | null;
   perfilSolicitadoCodigo?: string | null;
 };
@@ -863,7 +866,7 @@ function mapearUsuario(
 
 /** Catálogo público restrito, sem dados pessoais ou permissões globais. */
 export async function catalogosCadastro() {
-  const [unidades, perfis] = await Promise.all([
+  const [unidades, perfis, paises] = await Promise.all([
     sequelize.query<{ id: string; nome: string; tipoCodigo: string; statusAprovacao: string }>(
       `SELECT ul.id::text AS id, ul.nome, ul.nome_reduzido AS "nomeReduzido",
               tu.codigo AS "tipoCodigo", tu.nome AS "tipoNome",
@@ -881,9 +884,13 @@ export async function catalogosCadastro() {
        ORDER BY CASE codigo WHEN 'MEMBRO' THEN 1 WHEN 'CONSULTA' THEN 2
                     WHEN 'OPERADOR' THEN 3 ELSE 4 END`,
       { type: QueryTypes.SELECT }
+    ),
+    sequelize.query<{ id: string; nome: string; sigla: string | null }>(
+      `SELECT id::text AS id, nome, sigla FROM legio.pais ORDER BY nome`,
+      { type: QueryTypes.SELECT }
     )
   ]);
-  return { unidades, perfis };
+  return { unidades, perfis, paises };
 }
 
 export async function listarPerfisGlobais():
@@ -2146,6 +2153,39 @@ export async function excluir(
   );
 }
 
+
+/** CPF normalizado, com dígitos verificadores e rejeição a sequências repetidas. */
+function validarCpfCadastro(valor: string): boolean {
+  if (!/^\d{11}$/.test(valor) || /^(\d)\1{10}$/.test(valor)) return false;
+  const digito = (tamanho: number) => {
+    const soma = Array.from({ length: tamanho }, (_, i) =>
+      Number(valor[i]) * (tamanho + 1 - i)
+    ).reduce((a, b) => a + b, 0);
+    const resto = (soma * 10) % 11;
+    return resto === 10 ? 0 : resto;
+  };
+  return digito(9) === Number(valor[9]) && digito(10) === Number(valor[10]);
+}
+
+/** Retorna E.164; sem máscara e com prefixo internacional. */
+function validarTelefoneCadastro(valor: unknown, brasil: boolean, obrigatorio: boolean, campo: string): string | null {
+  const texto = String(valor ?? '').trim();
+  if (!texto) {
+    if (obrigatorio) throw new HttpError(400, `Informe ${campo}.`);
+    return null;
+  }
+  const limpo = texto.replace(/[\s().-]/g, '');
+  let e164 = limpo;
+  if (brasil && /^\d{10,11}$/.test(limpo)) e164 = `+55${limpo}`;
+  if (!/^\+[1-9]\d{7,14}$/.test(e164)) {
+    throw new HttpError(400, `${campo}: utilize código internacional +DD e número, sem máscara.`);
+  }
+  if (brasil && !/^\+55\d{10,11}$/.test(e164)) {
+    throw new HttpError(400, `${campo}: informe um telefone brasileiro válido com DDD.`);
+  }
+  return e164;
+}
+
 export async function criar(
   input: CriarUsuarioInput
 ): Promise<UsuarioCriado> {
@@ -2161,28 +2201,62 @@ export async function criar(
       input.nomePreferido
     );
 
-  const cpfInformado =
-    normalizarTextoOpcional(
-      input.cpf
-    );
+  const paisId = String(input.paisId ?? '').trim();
+  if (!/^[1-9]\d*$/.test(paisId)) throw new HttpError(400, 'Selecione o país.');
 
-  // O cadastro de pessoa pode conter CPF com ou sem pontuação.
-  const cpf =
-    cpfInformado
-      ? cpfInformado.replace(/\D/g, '')
-      : null;
+  const cpfInformado = normalizarTextoOpcional(input.cpf);
+  const cpf = cpfInformado ? cpfInformado.replace(/\D/g, '') : null;
+  const paises = await sequelize.query<{ id: string; sigla: string | null }>(
+    `SELECT id::text AS id, sigla FROM legio.pais WHERE id = CAST(:paisId AS integer) LIMIT 1`,
+    { replacements: { paisId }, type: QueryTypes.SELECT }
+  );
+  const pais = paises[0];
+  if (!pais) throw new HttpError(400, 'País não encontrado.');
+  const brasil = String(pais.sigla ?? '').trim().toUpperCase() === 'BR';
+  if (brasil && !cpf) throw new HttpError(400, 'CPF obrigatório para o Brasil.');
+  if (cpf && !validarCpfCadastro(cpf)) throw new HttpError(400, 'CPF inválido.');
 
-  if (cpfInformado && !cpf) {
-    throw new HttpError(
-      400,
-      'Informe um CPF válido.'
-    );
+  // Um único número de contato, para qualquer país.
+  // Nunca grava nem modifica pessoa.telefone neste fluxo.
+  const celular = validarTelefoneCadastro(input.celular, brasil, true, 'o celular');
+
+  // Município é obrigatório: o país da pessoa deriva de município -> UF -> país.
+  // paisId é apenas a seleção da interface e nunca é persistido em legio.pessoa.
+  const municipioId = String(input.municipioId ?? '').trim();
+  const subdivisaoLocalId = String(input.subdivisaoLocalId ?? '').trim() || null;
+  if (!/^[1-9]\d*$/.test(municipioId)) {
+    throw new HttpError(400, 'Selecione um município/localidade.');
   }
-
-  const celular =
-    normalizarTextoOpcional(
-      input.celular
+  if (subdivisaoLocalId && !/^[1-9]\d*$/.test(subdivisaoLocalId)) {
+    throw new HttpError(400, 'Região Administrativa inválida.');
+  }
+  const localidades = await sequelize.query<{ id: string; ufSigla: string | null }>(
+    `SELECT m.id::text AS id, u.sigla AS "ufSigla"
+     FROM legio.municipio m
+     JOIN legio.uf u ON u.id = m.id_uf
+     WHERE m.id = CAST(:municipioId AS integer)
+       AND u.id_pais = CAST(:paisId AS integer) LIMIT 1`,
+    { replacements: { municipioId, paisId }, type: QueryTypes.SELECT }
+  );
+  if (!localidades.length) {
+    throw new HttpError(400, 'Município não pertence ao país selecionado.');
+  }
+  const municipioNoDF = brasil && String(localidades[0].ufSigla ?? '').toUpperCase() === 'DF';
+  if (subdivisaoLocalId && !municipioNoDF) {
+    throw new HttpError(400, 'Região Administrativa é permitida somente para o Distrito Federal.');
+  }
+  if (subdivisaoLocalId) {
+    const subdivisoes = await sequelize.query<{ id: string }>(
+      `SELECT id::text FROM legio.subdivisao_local
+       WHERE id = CAST(:subdivisaoLocalId AS bigint)
+         AND municipio_id = CAST(:municipioId AS integer)
+         AND ativo = TRUE LIMIT 1`,
+      { replacements: { subdivisaoLocalId, municipioId }, type: QueryTypes.SELECT }
     );
+    if (!subdivisoes.length) {
+      throw new HttpError(400, 'Região Administrativa não pertence ao município escolhido.');
+    }
+  }
 
   const unidadeSolicitadaId = String(input.unidadeSolicitadaId ?? '').trim();
   const perfilSolicitadoCodigo = String(input.perfilSolicitadoCodigo ?? '').trim().toUpperCase();
@@ -2329,6 +2403,8 @@ export async function criar(
                   nome_preferido,
                   email,
                   celular,
+                  id_municipio,
+                  subdivisao_local_id,
                   cpf,
                   ativo
                 )
@@ -2338,6 +2414,8 @@ export async function criar(
                   :nomePreferido,
                   :email,
                   :celular,
+                  CAST(:municipioId AS integer),
+                  CAST(:subdivisaoLocalId AS bigint),
                   :cpf,
                   TRUE
                 )
@@ -2352,6 +2430,8 @@ export async function criar(
                 nomePreferido,
                 email,
                 celular,
+                municipioId,
+                subdivisaoLocalId,
                 cpf
               },
               type: QueryTypes.SELECT,
@@ -2479,5 +2559,36 @@ export async function criar(
         pessoaReutilizada
       };
     }
+  );
+}
+
+/** Localidades públicas cadastradas para o país escolhido. */
+export async function localidadesCadastro(paisIdValor: unknown) {
+  const paisId = String(paisIdValor ?? '').trim();
+  if (!/^[1-9]\d*$/.test(paisId)) throw new HttpError(400, 'País inválido.');
+  return sequelize.query<{ id: string; nome: string; ufNome: string; ufSigla: string | null }>(
+    `SELECT m.id::text AS id, m.nome, u.nome AS "ufNome", u.sigla AS "ufSigla"
+     FROM legio.municipio m
+     JOIN legio.uf u ON u.id = m.id_uf
+     WHERE u.id_pais = CAST(:paisId AS integer)
+     ORDER BY u.nome, m.nome`,
+    { replacements: { paisId }, type: QueryTypes.SELECT }
+  );
+}
+
+/** Subdivisões locais ativas pertencentes ao município informado. */
+export async function subdivisoesCadastro(municipioIdValor: unknown) {
+  const municipioId = String(municipioIdValor ?? '').trim();
+  if (!/^[1-9]\d*$/.test(municipioId)) throw new HttpError(400, 'Município inválido.');
+  return sequelize.query<{ id: string; nome: string; tipo: string | null }>(
+    `SELECT sl.id::text AS id, sl.nome, sl.tipo
+     FROM legio.subdivisao_local sl
+     JOIN legio.municipio m ON m.id = sl.municipio_id
+     JOIN legio.uf uf ON uf.id = m.id_uf
+     JOIN legio.pais pais ON pais.id = uf.id_pais
+     WHERE sl.municipio_id = CAST(:municipioId AS integer)
+       AND sl.ativo = TRUE AND uf.sigla = 'DF' AND UPPER(pais.sigla) = 'BR'
+     ORDER BY sl.nome`,
+    { replacements: { municipioId }, type: QueryTypes.SELECT }
   );
 }

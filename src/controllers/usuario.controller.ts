@@ -590,6 +590,9 @@ export async function cadastroPublico(
       nomePreferido,
       cpf,
       celular,
+      paisId,
+      municipioId,
+      subdivisaoLocalId,
       unidadeSolicitadaId,
       perfilSolicitadoCodigo
     } = req.body ?? {};
@@ -602,6 +605,9 @@ export async function cadastroPublico(
         nomePreferido,
         cpf,
         celular,
+        paisId,
+        municipioId,
+        subdivisaoLocalId,
         unidadeSolicitadaId,
         perfilSolicitadoCodigo
       });
@@ -631,6 +637,9 @@ export async function criar(
       nomePreferido,
       cpf,
       celular,
+      paisId,
+      municipioId,
+      subdivisaoLocalId,
       unidadeSolicitadaId,
       perfilSolicitadoCodigo
     } = req.body ?? {};
@@ -643,6 +652,9 @@ export async function criar(
         nomePreferido,
         cpf,
         celular,
+        paisId,
+        municipioId,
+        subdivisaoLocalId,
         unidadeSolicitadaId,
         perfilSolicitadoCodigo
       });
@@ -653,4 +665,14 @@ export async function criar(
   } catch (error) {
     next(error);
   }
+}
+
+/** Catálogos públicos de localidade (sem dados pessoais). */
+export async function localidadesCadastro(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+  try { res.json(await usuarioService.localidadesCadastro(req.query.paisId)); }
+  catch (error) { next(error); }
+}
+export async function subdivisoesCadastro(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+  try { res.json(await usuarioService.subdivisoesCadastro(req.query.municipioId)); }
+  catch (error) { next(error); }
 }
