@@ -53,8 +53,8 @@ export async function listar(
 
 /**
  * GET /api/oficiais/aniversariantes
- * ?mes=11            -> todos do mês de novembro
- * ?dias=15           -> próximos 15 dias (padrão 30)
+ * ?mes=11            -> todos do mes de novembro
+ * ?dias=15           -> proximos 15 dias (padrao 30)
  */
 export async function aniversariantes(
   req: AuthenticatedRequest,
@@ -75,7 +75,7 @@ export async function aniversariantes(
 
 /**
  * GET /api/oficiais/resumo
- * Contadores para os cards e o total de aniversariantes do mês.
+ * Contadores para os cards e o total de aniversariantes do mes.
  */
 export async function resumo(
   req: AuthenticatedRequest,
@@ -107,6 +107,28 @@ export async function cargos(
     const lista = await oficialService.listarCargos();
 
     res.json(lista);
+  } catch (error) {
+    next(error);
+  }
+}
+
+/**
+ * DELETE /api/oficiais/:id
+ *
+ * Encerra o mandato. O "id" e o do vinculo em
+ * membro_cargo_unidade, nao o do membro.
+ */
+export async function encerrar(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const id = String(req.params.id ?? '');
+
+    await oficialService.encerrar(id);
+
+    res.status(204).send();
   } catch (error) {
     next(error);
   }

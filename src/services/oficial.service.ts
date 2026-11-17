@@ -33,9 +33,9 @@ export type OficialListado = {
   numeroMandato: number | null;
   dataInicio: string;
   dataFim: string | null;
-  /** Meses completos desde o início do mandato. */
+  /** Meses completos desde o inicio do mandato. */
   mesesMandato: number | null;
-  /** Fim previsto do mandato: 12 meses após o início. */
+  /** Fim previsto do mandato: 12 meses apos o inicio. */
   fimPrevisto: string | null;
   mandatoVigente: boolean;
 
@@ -73,7 +73,7 @@ export type FiltrosOficiais = {
   somenteVigentes?: boolean;
 };
 
-/** Meses de um mandato legionário padrão. */
+/** Meses de um mandato legionario padrao. */
 const MESES_MANDATO = 12;
 
 function texto(valor: unknown): string | null {
@@ -84,7 +84,7 @@ function texto(valor: unknown): string | null {
 /**
  * Lista de oficiais: quem tem cargo ativo em membro_cargo_unidade.
  *
- * "Oficial" não é um tipo de pessoa no schema — é o vínculo entre
+ * "Oficial" nao e um tipo de pessoa no schema  -  e o vinculo entre
  * um membro, uma unidade e um cargo oficial.
  */
 export async function listar(
@@ -97,7 +97,7 @@ export async function listar(
   const somenteVigentes = filtros.somenteVigentes === true;
 
   if (unidadeId && !/^\d+$/.test(unidadeId)) {
-    throw new HttpError(400, 'Informe uma unidade válida.');
+    throw new HttpError(400, 'Informe uma unidade valida.');
   }
 
   return sequelize.query<OficialListado>(
@@ -217,8 +217,8 @@ export async function listar(
 /**
  * Aniversariantes oficiais.
  *
- * `mes` filtra por um mês específico (1-12); quando nulo, devolve
- * os próximos `dias` a contar de hoje.
+ * `mes` filtra por um mes especifico (1-12); quando nulo, devolve
+ * os proximos `dias` a contar de hoje.
  */
 export async function aniversariantes(
   mes: number | null,
@@ -226,7 +226,7 @@ export async function aniversariantes(
 ): Promise<Aniversariante[]> {
 
   if (mes !== null && (mes < 1 || mes > 12)) {
-    throw new HttpError(400, 'Informe um mês entre 1 e 12.');
+    throw new HttpError(400, 'Informe um mes entre 1 e 12.');
   }
 
   const janela = Number.isFinite(dias) && dias > 0 ? dias : 30;
@@ -270,7 +270,7 @@ export async function aniversariantes(
       com_data AS (
         SELECT
           base.*,
-          -- Próxima ocorrência do aniversário a partir de hoje.
+          -- Proxima ocorrencia do aniversario a partir de hoje.
           make_date(
             EXTRACT(YEAR FROM CURRENT_DATE)::int,
             base.mes,
@@ -415,6 +415,58 @@ export async function listarCargos(): Promise<
     `,
     {
       type: QueryTypes.SELECT
+    }
+  );
+}
+
+/**
+ * Encerra o mandato de um oficial.
+ *
+ * O "id" recebido e o id do vinculo em membro_cargo_unidade, nao
+ * o id do membro. A exclusao e logica: o vinculo vira inativo e
+ * recebe data_fim, preservando o historico de quem ocupou o cargo.
+ */
+export async function encerrar(
+  vinculoId: string
+): Promise<void> {
+
+  if (!/^\d+$/.test(vinculoId)) {
+    throw new HttpError(400, 'Informe um oficial valido.');
+  }
+
+  const linhas = await sequelize.query<{ id: string; ativo: boolean }>(
+    `
+      SELECT id::text, ativo
+      FROM legio.membro_cargo_unidade
+      WHERE id = CAST(:vinculoId AS bigint)
+      LIMIT 1
+    `,
+    {
+      replacements: { vinculoId },
+      type: QueryTypes.SELECT
+    }
+  );
+
+  const vinculo = linhas[0];
+
+  if (!vinculo) {
+    throw new HttpError(404, 'Vinculo de cargo nao encontrado.');
+  }
+
+  if (!vinculo.ativo) {
+    throw new HttpError(409, 'Este mandato ja esta encerrado.');
+  }
+
+  await sequelize.query(
+    `
+      UPDATE legio.membro_cargo_unidade
+         SET ativo = FALSE,
+             data_fim = coalesce(data_fim, CURRENT_DATE),
+             updated_at = CURRENT_TIMESTAMP
+       WHERE id = CAST(:vinculoId AS bigint)
+    `,
+    {
+      replacements: { vinculoId }
     }
   );
 }
