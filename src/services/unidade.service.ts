@@ -269,6 +269,11 @@ export type UnidadeDetalhe = {
   igrejaId: string;
   paisId: string;
   ufId: string;
+  paisNome?: string;
+  ufNome?: string;
+  municipioNome?: string;
+  igrejaNome?: string;
+  subdivisaoLocalNome?: string | null;
   subdivisaoLocalId: string | null; // subdivisão da paróquia
   codigoPostal: string | null; // CEP da paróquia
   sedeEnderecoProprio: boolean;
@@ -392,6 +397,25 @@ function normalizarTextoOpcional(valor: unknown): string | null {
 
 function normalizarTextoMaiusculo(valor: unknown): string {
   return String(valor ?? '').trim().toUpperCase();
+}
+
+/** Lista de e-mails de contato da unidade, armazenada no mesmo campo. */
+function normalizarEmailsUnidade(valor: unknown): string | null {
+  const bruto = normalizarTextoOpcional(valor);
+  if (!bruto) return null;
+
+  const emails = bruto.split(';').map((email) => email.trim().toLowerCase());
+  const padrao = /^[^\s@;]+@[^\s@;]+\.[^\s@;]+$/;
+
+  if (emails.some((email) => !padrao.test(email))) {
+    throw new HttpError(400, 'Informe e-mails válidos para a unidade, separados por ponto e vírgula (;).');
+  }
+
+  const normalizados = emails.join(';');
+  if (normalizados.length > 254) {
+    throw new HttpError(400, 'Os e-mails da unidade devem possuir no máximo 254 caracteres no total.');
+  }
+  return normalizados;
 }
 
 function normalizarTextoOpcionalMaiusculo(valor: unknown): string | null {
@@ -2446,24 +2470,10 @@ export async function criar(
     input.nomeReduzido
   );
 
-  const email = normalizarTextoOpcional(input.email);
+  const email = normalizarEmailsUnidade(input.email);
   const celular = normalizarTextoOpcional(input.celular);
   const telefone = normalizarTextoOpcional(input.telefone);
   const site = normalizarTextoOpcional(input.site);
-
-  if (email && email.length > 254) {
-    throw new HttpError(
-      400,
-      'O e-mail da unidade deve possuir no máximo 254 caracteres.'
-    );
-  }
-
-  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    throw new HttpError(
-      400,
-      'Informe um e-mail válido para a unidade.'
-    );
-  }
 
   if (celular && celular.length > 30) {
     throw new HttpError(
@@ -2792,6 +2802,11 @@ export async function obterPorId(
     igreja_id: string;
     pais_id: string;
     uf_id: string;
+    pais_nome: string;
+    uf_nome: string;
+    municipio_nome: string;
+    igreja_nome: string;
+    subdivisao_local_nome: string | null;
     subdivisao_local_id: string | null;
     codigo_postal: string | null;
     sede_endereco_proprio: boolean;
@@ -2826,6 +2841,11 @@ export async function obterPorId(
         ul.igreja_id::text,
         p.id::text AS pais_id,
         uf.id::text AS uf_id,
+        p.nome AS pais_nome,
+        uf.nome AS uf_nome,
+        m.nome AS municipio_nome,
+        i.nome AS igreja_nome,
+        sl.nome AS subdivisao_local_nome,
         i.subdivisao_local_id::text,
         i.codigo_postal AS codigo_postal,
         ul.subdivisao_local_id::text AS sede_subdivisao_local_id,
@@ -2862,6 +2882,8 @@ export async function obterPorId(
         ON p.id = uf.id_pais
       JOIN legio.igreja i
         ON i.id = ul.igreja_id
+      LEFT JOIN legio.subdivisao_local sl
+        ON sl.id = COALESCE(ul.subdivisao_local_id, i.subdivisao_local_id)
       WHERE ul.id = CAST(:id AS bigint)
       LIMIT 1
     `,
@@ -2890,6 +2912,11 @@ export async function obterPorId(
     igrejaId: item.igreja_id,
     paisId: item.pais_id,
     ufId: item.uf_id,
+    paisNome: item.pais_nome,
+    ufNome: item.uf_nome,
+    municipioNome: item.municipio_nome,
+    igrejaNome: item.igreja_nome,
+    subdivisaoLocalNome: item.subdivisao_local_nome,
     subdivisaoLocalId: item.subdivisao_local_id,
     codigoPostal: item.codigo_postal,
     sedeEnderecoProprio: item.sede_endereco_proprio,
@@ -2935,7 +2962,7 @@ export async function atualizar(
   const usuarioId = normalizarId(input.usuarioId, 'um usuário');
 
   const nomeReduzido = normalizarTextoOpcionalMaiusculo(input.nomeReduzido);
-  const email = normalizarTextoOpcional(input.email);
+  const email = normalizarEmailsUnidade(input.email);
   const celular = normalizarTextoOpcional(input.celular);
   const telefone = normalizarTextoOpcional(input.telefone);
   const site = normalizarTextoOpcional(input.site);

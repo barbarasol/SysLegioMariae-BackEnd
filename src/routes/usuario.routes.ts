@@ -6,6 +6,8 @@ import {
   adicionarAcessoUnidade,
   aprovarSolicitacao,
   catalogosCadastro,
+  verificarCadastro,
+  configuracaoTurnstile,
   localidadesCadastro,
   subdivisoesCadastro,
   alterarAcessoUnidade,
@@ -35,6 +37,8 @@ const router =
  * sem perfil global e sem perfil de unidade.
  */
 router.get('/catalogos-cadastro', catalogosCadastro);
+router.get('/turnstile-config', configuracaoTurnstile);
+router.post('/verificar-cadastro', verificarCadastro);
 router.get('/localidades-cadastro', localidadesCadastro);
 router.get('/subdivisoes-cadastro', subdivisoesCadastro);
 

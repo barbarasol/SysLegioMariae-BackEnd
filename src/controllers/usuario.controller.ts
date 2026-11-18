@@ -13,6 +13,7 @@ import type {
 
 import * as usuarioService
   from '../services/usuario.service.js';
+import { exigirTurnstile, obterSiteKeyTurnstile } from '../services/turnstile.service.js';
 
 import {
   HttpError
@@ -577,12 +578,46 @@ export async function excluir(
   }
 }
 
+/** Site key pública; a chave secreta permanece somente no backend. */
+export async function configuracaoTurnstile(_req: AuthenticatedRequest, res: Response): Promise<void> {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ siteKey: obterSiteKeyTurnstile() });
+}
+
+/** Validação prévia pública, com limite por IP e mensagem genérica. */
+const tentativasCadastro = new Map<string, { inicio: number; quantidade: number }>();
+export async function verificarCadastro(
+  req: AuthenticatedRequest, res: Response, next: NextFunction
+): Promise<void> {
+  try {
+    const agora = Date.now();
+    if (tentativasCadastro.size > 10000) tentativasCadastro.clear();
+    const chave = req.ip || 'desconhecido';
+    const anterior = tentativasCadastro.get(chave);
+    const atual = !anterior || agora - anterior.inicio >= 60000
+      ? { inicio: agora, quantidade: 1 }
+      : { inicio: anterior.inicio, quantidade: anterior.quantidade + 1 };
+    tentativasCadastro.set(chave, atual);
+    if (atual.quantidade > 10) {
+      res.setHeader('Retry-After', '60');
+      res.status(429).json({ message: 'Muitas verificações. Aguarde um minuto e tente novamente.' });
+      return;
+    }
+    await exigirTurnstile(req.body?.turnstileToken);
+    const resultado = await usuarioService.verificarCadastroExistente(req.body ?? {});
+    res.setHeader('Cache-Control', 'no-store');
+    // Não identifica qual dado conflitou, nem retorna informações cadastrais.
+    res.status(200).json(resultado);
+  } catch (error) { next(error); }
+}
+
 export async function cadastroPublico(
   req: AuthenticatedRequest,
   res: Response,
   next: NextFunction
 ): Promise<void> {
   try {
+    await exigirTurnstile(req.body?.turnstileToken);
     const {
       nome,
       email,

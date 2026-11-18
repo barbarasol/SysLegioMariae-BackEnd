@@ -2186,6 +2186,30 @@ function validarTelefoneCadastro(valor: unknown, brasil: boolean, obrigatorio: b
   return e164;
 }
 
+/** Confere CPF e e-mail sem retornar dados da pessoa/conta. */
+export async function verificarCadastroExistente(input: { cpf?: unknown; email?: unknown }): Promise<{ disponivel: boolean }> {
+  const email = normalizarEmail(input.email);
+  const cpf = String(input.cpf ?? '').replace(/\D/g, '');
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    throw new HttpError(400, 'Informe um e-mail válido.');
+  }
+  if (cpf && !validarCpfCadastro(cpf)) {
+    throw new HttpError(400, 'CPF inválido.');
+  }
+  const resultados = await sequelize.query<{ existe: boolean }>(
+    `SELECT (
+      EXISTS (SELECT 1 FROM legio.usuario u WHERE lower(u.email) = :email)
+      OR EXISTS (SELECT 1 FROM legio.pessoa p WHERE lower(COALESCE(p.email, '')) = :email)
+      OR (:cpf <> '' AND EXISTS (
+        SELECT 1 FROM legio.pessoa p
+        WHERE regexp_replace(COALESCE(p.cpf, ''), '[^0-9]', '', 'g') = :cpf
+      ))
+    ) AS existe`,
+    { replacements: { cpf, email }, type: QueryTypes.SELECT }
+  );
+  return { disponivel: resultados[0]?.existe !== true };
+}
+
 export async function criar(
   input: CriarUsuarioInput
 ): Promise<UsuarioCriado> {
@@ -2275,6 +2299,13 @@ export async function criar(
 
   return sequelize.transaction(
     async (transaction) => {
+
+      // Revalidar no momento da gravação, mesmo que a verificação prévia tenha passado.
+      const disponibilidade = await verificarCadastroExistente({ cpf, email });
+      if (!disponibilidade.disponivel) {
+        throw new HttpError(409,
+          'Cadastro já existente. O CPF ou e-mail informado já consta em nosso sistema. Entre em contato com o suporte: syslegiomariae@gmail.com.');
+      }
 
       // Todas as verificações e gravações usam a mesma transação.
       const usuariosComEmail =
