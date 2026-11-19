@@ -1,6 +1,7 @@
 import { QueryTypes } from 'sequelize';
 import { sequelize } from '../config/database.js';
 import { HttpError } from '../utils/http-error.js';
+import { unidadesPermitidas, exigirUnidadePermitida } from './hierarquia-acesso.service.js';
 
 export type OficialListado = {
   id: string;
@@ -69,6 +70,7 @@ export type ResumoOficiais = {
 export type FiltrosOficiais = {
   busca?: string | null;
   unidadeId?: string | null;
+  tipoUnidade?: string | null;
   cargo?: string | null;
   somenteVigentes?: boolean;
 };
@@ -88,17 +90,23 @@ function texto(valor: unknown): string | null {
  * um membro, uma unidade e um cargo oficial.
  */
 export async function listar(
-  filtros: FiltrosOficiais = {}
+  usuarioId: string, filtros: FiltrosOficiais = {}
 ): Promise<OficialListado[]> {
 
   const busca = texto(filtros.busca);
   const unidadeId = texto(filtros.unidadeId);
   const cargo = texto(filtros.cargo)?.toUpperCase() ?? null;
+  const tipoUnidade = texto(filtros.tipoUnidade)?.toUpperCase() ?? null;
   const somenteVigentes = filtros.somenteVigentes === true;
 
   if (unidadeId && !/^\d+$/.test(unidadeId)) {
     throw new HttpError(400, 'Informe uma unidade valida.');
   }
+
+  const unidades = await unidadesPermitidas(usuarioId);
+  const ids = unidades.map(u => u.id);
+  if (unidadeId && !ids.includes(unidadeId)) throw new HttpError(403, 'Unidade não autorizada.');
+  if (!ids.length) return [];
 
   return sequelize.query<OficialListado>(
     `
@@ -174,6 +182,8 @@ export async function listar(
         ON tu.id = ul.tipo_unidade_id
 
       WHERE mcu.ativo = TRUE
+        AND ul.id IN (:ids)
+        AND (CAST(:tipoUnidade AS varchar) IS NULL OR tu.codigo = CAST(:tipoUnidade AS varchar))
         AND cl.eh_oficial = TRUE
         AND cl.ativo = TRUE
         AND (
@@ -205,6 +215,8 @@ export async function listar(
       replacements: {
         busca,
         unidadeId,
+        tipoUnidade,
+        ids,
         cargo,
         somenteVigentes,
         mesesMandato: MESES_MANDATO
@@ -221,8 +233,8 @@ export async function listar(
  * os proximos `dias` a contar de hoje.
  */
 export async function aniversariantes(
-  mes: number | null,
-  dias: number
+  usuarioId: string, mes: number | null, dias: number,
+  filtros: { unidadeId?: string | null; tipoUnidade?: string | null } = {}
 ): Promise<Aniversariante[]> {
 
   if (mes !== null && (mes < 1 || mes > 12)) {
@@ -230,6 +242,12 @@ export async function aniversariantes(
   }
 
   const janela = Number.isFinite(dias) && dias > 0 ? dias : 30;
+  const unidades = await unidadesPermitidas(usuarioId);
+  const ids = unidades.map(u => u.id);
+  const unidadeId = texto(filtros.unidadeId);
+  const tipoUnidade = texto(filtros.tipoUnidade)?.toUpperCase() ?? null;
+  if (unidadeId && !ids.includes(unidadeId)) throw new HttpError(403, 'Unidade não autorizada.');
+  if (!ids.length) return [];
 
   return sequelize.query<Aniversariante>(
     `
@@ -259,6 +277,9 @@ export async function aniversariantes(
         JOIN legio.tipo_unidade tu
           ON tu.id = ul.tipo_unidade_id
         WHERE mcu.ativo = TRUE
+          AND ul.id IN (:ids)
+          AND (CAST(:unidadeId AS bigint) IS NULL OR ul.id = CAST(:unidadeId AS bigint))
+          AND (CAST(:tipoUnidade AS varchar) IS NULL OR tu.codigo = CAST(:tipoUnidade AS varchar))
           AND cl.eh_oficial = TRUE
           AND cl.ativo = TRUE
           AND p.data_nascimento IS NOT NULL
@@ -332,6 +353,7 @@ export async function aniversariantes(
     {
       replacements: {
         mes,
+        ids, unidadeId, tipoUnidade,
         dias: janela
       },
       type: QueryTypes.SELECT
@@ -340,8 +362,15 @@ export async function aniversariantes(
 }
 
 export async function resumo(
-  mes: number
+  usuarioId: string, mes: number,
+  filtros: { unidadeId?: string | null; tipoUnidade?: string | null } = {}
 ): Promise<ResumoOficiais> {
+  const unidades = await unidadesPermitidas(usuarioId);
+  const ids = unidades.map(u => u.id);
+  const unidadeId = texto(filtros.unidadeId);
+  const tipoUnidade = texto(filtros.tipoUnidade)?.toUpperCase() ?? null;
+  if (unidadeId && !ids.includes(unidadeId)) throw new HttpError(403, 'Unidade não autorizada.');
+  if (!ids.length) return { total: 0, totalCargos: 0, porCargo: [], aniversariantesMes: 0 };
 
   const porCargo = await sequelize.query<{
     cargo: string;
@@ -356,7 +385,12 @@ export async function resumo(
       FROM legio.membro_cargo_unidade mcu
       JOIN legio.cargo_legionario cl
         ON cl.id = mcu.cargo_id
-      WHERE mcu.ativo = TRUE
+      JOIN legio.unidade_legionaria ul ON ul.id = mcu.unidade_id
+      JOIN legio.tipo_unidade tu ON tu.id = ul.tipo_unidade_id
+      WHERE ul.id IN (:ids)
+        AND (CAST(:unidadeId AS bigint) IS NULL OR ul.id = CAST(:unidadeId AS bigint))
+        AND (CAST(:tipoUnidade AS varchar) IS NULL OR tu.codigo = CAST(:tipoUnidade AS varchar))
+        AND mcu.ativo = TRUE
         AND cl.eh_oficial = TRUE
         AND cl.ativo = TRUE
         AND (
@@ -367,11 +401,12 @@ export async function resumo(
       ORDER BY cl.ordem_exibicao NULLS LAST
     `,
     {
+      replacements: { ids, unidadeId, tipoUnidade },
       type: QueryTypes.SELECT
     }
   );
 
-  const aniversariantesMes = await aniversariantes(mes, 30);
+  const aniversariantesMes = await aniversariantes(usuarioId, mes, 30, filtros);
 
   const total = porCargo.reduce(
     (soma, item) => soma + Number(item.total),
@@ -381,10 +416,16 @@ export async function resumo(
   const linhas = await sequelize.query<{ total: string }>(
     `
       SELECT count(*)::text AS total
-      FROM legio.membro_cargo_unidade
-      WHERE ativo = TRUE
+      FROM legio.membro_cargo_unidade mcu
+      JOIN legio.unidade_legionaria ul ON ul.id = mcu.unidade_id
+      JOIN legio.tipo_unidade tu ON tu.id = ul.tipo_unidade_id
+      WHERE mcu.ativo = TRUE
+        AND ul.id IN (:ids)
+        AND (CAST(:unidadeId AS bigint) IS NULL OR ul.id = CAST(:unidadeId AS bigint))
+        AND (CAST(:tipoUnidade AS varchar) IS NULL OR tu.codigo = CAST(:tipoUnidade AS varchar))
     `,
     {
+      replacements: { ids, unidadeId, tipoUnidade },
       type: QueryTypes.SELECT
     }
   );
@@ -427,16 +468,16 @@ export async function listarCargos(): Promise<
  * recebe data_fim, preservando o historico de quem ocupou o cargo.
  */
 export async function encerrar(
-  vinculoId: string
+  usuarioId: string, vinculoId: string
 ): Promise<void> {
 
   if (!/^\d+$/.test(vinculoId)) {
     throw new HttpError(400, 'Informe um oficial valido.');
   }
 
-  const linhas = await sequelize.query<{ id: string; ativo: boolean }>(
+  const linhas = await sequelize.query<{ id: string; ativo: boolean; unidade_id: string }>(
     `
-      SELECT id::text, ativo
+      SELECT id::text, ativo, unidade_id::text
       FROM legio.membro_cargo_unidade
       WHERE id = CAST(:vinculoId AS bigint)
       LIMIT 1
@@ -452,6 +493,8 @@ export async function encerrar(
   if (!vinculo) {
     throw new HttpError(404, 'Vinculo de cargo nao encontrado.');
   }
+
+  await exigirUnidadePermitida(usuarioId, vinculo.unidade_id, 'EDITAR');
 
   if (!vinculo.ativo) {
     throw new HttpError(409, 'Este mandato ja esta encerrado.');

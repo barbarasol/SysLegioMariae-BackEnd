@@ -4,7 +4,8 @@ import {
   cargos,
   encerrar,
   listar,
-  resumo
+  resumo,
+  unidadesAcessiveis
 } from '../controllers/oficial.controller.js';
 import {
   authMiddleware
@@ -21,6 +22,8 @@ router.get('/aniversariantes', aniversariantes);
 router.get('/resumo', resumo);
 
 router.get('/cargos', cargos);
+
+router.get('/unidades-acessiveis', unidadesAcessiveis);
 
 router.delete('/:id', encerrar);
 

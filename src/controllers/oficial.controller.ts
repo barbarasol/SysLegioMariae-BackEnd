@@ -3,9 +3,16 @@ import type {
   Response
 } from 'express';
 import * as oficialService from '../services/oficial.service.js';
+import { unidadesPermitidas } from '../services/hierarquia-acesso.service.js';
+import { HttpError } from '../utils/http-error.js';
 import type {
   AuthenticatedRequest
 } from '../middlewares/auth.middleware.js';
+
+function exigirUsuario(req: AuthenticatedRequest): string {
+  if (!req.auth?.usuarioId) throw new HttpError(401, 'Sessão não autenticada.');
+  return req.auth.usuarioId;
+}
 
 function queryString(valor: unknown): string | null {
   if (typeof valor === 'string') {
@@ -38,9 +45,10 @@ export async function listar(
   next: NextFunction
 ): Promise<void> {
   try {
-    const oficiais = await oficialService.listar({
+    const oficiais = await oficialService.listar(exigirUsuario(req), {
       busca: queryString(req.query.busca),
       unidadeId: queryString(req.query.unidadeId),
+      tipoUnidade: queryString(req.query.tipoUnidade),
       cargo: queryString(req.query.cargo),
       somenteVigentes: queryString(req.query.vigentes) === 'true'
     });
@@ -65,7 +73,10 @@ export async function aniversariantes(
     const mes = queryNumero(req.query.mes);
     const dias = queryNumero(req.query.dias) ?? 30;
 
-    const lista = await oficialService.aniversariantes(mes, dias);
+    const lista = await oficialService.aniversariantes(exigirUsuario(req), mes, dias, {
+      unidadeId: queryString(req.query.unidadeId),
+      tipoUnidade: queryString(req.query.tipoUnidade)
+    });
 
     res.json(lista);
   } catch (error) {
@@ -86,7 +97,10 @@ export async function resumo(
     const agora = new Date();
     const mes = queryNumero(req.query.mes) ?? agora.getMonth() + 1;
 
-    const dados = await oficialService.resumo(mes);
+    const dados = await oficialService.resumo(exigirUsuario(req), mes, {
+      unidadeId: queryString(req.query.unidadeId),
+      tipoUnidade: queryString(req.query.tipoUnidade)
+    });
 
     res.json(dados);
   } catch (error) {
@@ -126,10 +140,18 @@ export async function encerrar(
   try {
     const id = String(req.params.id ?? '');
 
-    await oficialService.encerrar(id);
+    await oficialService.encerrar(exigirUsuario(req), id);
 
     res.status(204).send();
   } catch (error) {
     next(error);
   }
+}
+/** Catálogo restrito ao escopo hierárquico do usuário autenticado. */
+export async function unidadesAcessiveis(
+  req: AuthenticatedRequest, res: Response, next: NextFunction
+): Promise<void> {
+  try {
+    res.json(await unidadesPermitidas(exigirUsuario(req)));
+  } catch (error) { next(error); }
 }
