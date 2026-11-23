@@ -521,6 +521,15 @@ export type AtualizarOficialInput = {
   celular?: string | null;
   telefone?: string | null;
   dataNascimento?: string | null;
+  dtOrdenacaoPresbiteral?: string | null;
+  municipioId?: string | null;
+  subdivisaoLocalId?: string | null;
+  cep?: string | null;
+  localidade?: string | null;
+  logradouro?: string | null;
+  numeroLogradouro?: string | null;
+  complemento?: string | null;
+  bairro?: string | null;
   unidadeId: string;
   cargo: string;
   numeroMandato?: number | null;
@@ -549,7 +558,31 @@ export async function obter(usuarioId: string, vinculoId: string): Promise<Ofici
   const oficial = lista.find(o => o.id === vinculoId);
   if (!oficial) throw new HttpError(404, 'Oficial não encontrado no seu escopo.');
   const unidades = await unidadesPermitidas(usuarioId);
-  return { ...oficial, podeEditar: unidades.some(u => u.id === oficial.unidadeId && u.podeEditar) };
+  const detalhes = await sequelize.query<{
+    dtOrdenacaoPresbiteral: string | null; municipioId: string | null;
+    subdivisaoLocalId: string | null; paisId: string | null; ufId: string | null;
+    paisNome: string | null; ufNome: string | null; municipioNome: string | null;
+    subdivisaoLocalNome: string | null;
+    cep: string | null; localidade: string | null; logradouro: string | null;
+    numeroLogradouro: string | null; complemento: string | null; bairro: string | null;
+  }>(`
+    SELECT p.dt_ordenacao_presbiteral::text AS "dtOrdenacaoPresbiteral",
+      p.id_municipio::text AS "municipioId",
+      p.subdivisao_local_id::text AS "subdivisaoLocalId",
+      uf.id::text AS "ufId", pais.id::text AS "paisId",
+      uf.nome AS "ufNome", pais.nome AS "paisNome", m.nome AS "municipioNome",
+      sl.nome AS "subdivisaoLocalNome",
+      p.cep, p.localidade, p.logradouro,
+      p.numero_logradouro AS "numeroLogradouro", p.complemento, p.bairro
+    FROM legio.pessoa p
+    LEFT JOIN legio.municipio m ON m.id = p.id_municipio
+    LEFT JOIN legio.uf uf ON uf.id = m.id_uf
+    LEFT JOIN legio.pais pais ON pais.id = uf.id_pais
+    LEFT JOIN legio.subdivisao_local sl ON sl.id = p.subdivisao_local_id
+    WHERE p.id = CAST(:pessoaId AS bigint)
+    LIMIT 1
+  `, { replacements: { pessoaId: oficial.pessoaId }, type: QueryTypes.SELECT });
+  return { ...oficial, ...detalhes[0], podeEditar: unidades.some(u => u.id === oficial.unidadeId && u.podeEditar) };
 }
 
 /** Edita o vínculo e os dados pessoais autorizados, sem alterar CPF ou RG. */
@@ -593,16 +626,67 @@ export async function atualizar(
       WHERE codigo = :cargo AND ativo = TRUE AND eh_oficial = TRUE LIMIT 1
     `, { replacements: { cargo }, transaction, type: QueryTypes.SELECT });
     if (!cargos[0]) throw new HttpError(400, 'Cargo de oficial inválido.');
+    const dadosCargo = await sequelize.query<{ codigo: string; nome: string }>(`
+      SELECT codigo, nome FROM legio.cargo_legionario WHERE id = :id
+    `, { replacements: { id: cargos[0].id }, transaction, type: QueryTypes.SELECT });
+    const diretor = !!dadosCargo[0] && (
+      /DIRETOR[_\s-]*ESPIRITUAL/i.test(dadosCargo[0].codigo) ||
+      /DIRETOR\s+ESPIRITUAL/i.test(dadosCargo[0].nome)
+    );
+    const ordenacao = validarData(input.dtOrdenacaoPresbiteral);
+    if (ordenacao && !diretor) throw new HttpError(422, 'Data de ordenação é exclusiva do Diretor Espiritual.');
+    const municipioId = texto(input.municipioId);
+    const subdivisaoLocalId = texto(input.subdivisaoLocalId);
+    if (municipioId && !/^\d+$/.test(municipioId)) throw new HttpError(400, 'Município inválido.');
+    if (subdivisaoLocalId && !/^\d+$/.test(subdivisaoLocalId)) throw new HttpError(400, 'Subdivisão inválida.');
+    if (subdivisaoLocalId && !municipioId) throw new HttpError(422, 'Informe o município da subdivisão.');
+    if (municipioId) {
+      const municipios = await sequelize.query<{ id: string }>(`
+        SELECT id::text FROM legio.municipio WHERE id = CAST(:municipioId AS integer)
+      `, { replacements: { municipioId }, transaction, type: QueryTypes.SELECT });
+      if (!municipios.length) throw new HttpError(422, 'Município não cadastrado.');
+    }
+    if (subdivisaoLocalId) {
+      const subdivisoes = await sequelize.query<{ id: string }>(`
+        SELECT id::text FROM legio.subdivisao_local
+        WHERE id = CAST(:subdivisaoLocalId AS bigint)
+          AND municipio_id = CAST(:municipioId AS integer)
+      `, { replacements: { subdivisaoLocalId, municipioId }, transaction, type: QueryTypes.SELECT });
+      if (!subdivisoes.length) throw new HttpError(422, 'Subdivisão não pertence ao município.');
+    }
+    const endereco = {
+      municipioId, subdivisaoLocalId,
+      cep: texto(input.cep), localidade: texto(input.localidade),
+      logradouro: texto(input.logradouro), numeroLogradouro: texto(input.numeroLogradouro),
+      complemento: texto(input.complemento), bairro: texto(input.bairro)
+    };
+    const limites: Record<keyof typeof endereco, number> = {
+      municipioId: 20, subdivisaoLocalId: 20, cep: 20, localidade: 120,
+      logradouro: 200, numeroLogradouro: 30, complemento: 150, bairro: 120
+    };
+    for (const chave of Object.keys(endereco) as Array<keyof typeof endereco>) {
+      if (endereco[chave] && endereco[chave]!.length > limites[chave])
+        throw new HttpError(422, `Campo ${chave} excede ${limites[chave]} caracteres.`);
+    }
+
     await sequelize.query(`
       UPDATE legio.pessoa SET nome = :nome, nome_preferido = :nomePreferido,
         email = :email, celular = :celular, telefone = :telefone,
-        data_nascimento = CAST(:nascimento AS date)
+        data_nascimento = CAST(:nascimento AS date),
+        dt_ordenacao_presbiteral = CASE
+          WHEN :diretor = TRUE THEN COALESCE(CAST(:ordenacao AS date), dt_ordenacao_presbiteral)
+          ELSE dt_ordenacao_presbiteral END,
+        id_municipio = CAST(:municipioId AS integer),
+        subdivisao_local_id = CAST(:subdivisaoLocalId AS bigint),
+        cep = :cep, localidade = :localidade, logradouro = :logradouro,
+        numero_logradouro = :numeroLogradouro, complemento = :complemento,
+        bairro = :bairro
       WHERE id = CAST(:pessoaId AS bigint)
     `, { replacements: {
       pessoaId: vinculo.pessoa_id, nome,
       nomePreferido: texto(input.nomePreferido), email,
       celular: texto(input.celular), telefone: texto(input.telefone),
-      nascimento: validarData(input.dataNascimento)
+      nascimento: validarData(input.dataNascimento), diretor, ordenacao, ...endereco
     }, transaction });
     await sequelize.query(`
       UPDATE legio.membro_cargo_unidade SET

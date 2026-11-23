@@ -95,6 +95,7 @@ export async function criar(
     const dados = await service.criar({
       origem: corpo.origem,
       membroId: corpo.membroId ?? null,
+      pessoaId: corpo.pessoaId ?? null,
 
       pessoaNome: corpo.pessoaNome ?? null,
       pessoaNomePreferido: corpo.pessoaNomePreferido ?? null,

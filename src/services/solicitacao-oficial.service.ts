@@ -45,7 +45,8 @@ export type SolicitacaoOficialListada = {
 export type CriarSolicitacaoInput = {
   origem: OrigemOficial;
 
-  /** Obrigatorio quando origem = MEMBRO_EXISTENTE. */
+  /** Pessoa já cadastrada; pode ainda não possuir vínculo de membro. */
+  pessoaId?: string | null;
   membroId?: string | null;
 
   /** Obrigatorios quando origem = PESSOA_NOVA. */
@@ -154,14 +155,14 @@ export async function listar(
         so.id::text                        AS id,
 
         CASE
-          WHEN so.membro_id IS NOT NULL THEN 'MEMBRO_EXISTENTE'
+          WHEN so.pessoa_id IS NOT NULL OR so.membro_id IS NOT NULL THEN 'MEMBRO_EXISTENTE'
           ELSE 'PESSOA_NOVA'
         END                                AS origem,
 
         so.status,
 
         so.membro_id::text                 AS "membroId",
-        p.id::text                         AS "pessoaId",
+        coalesce(p.id, so.pessoa_id)::text AS "pessoaId",
 
         coalesce(p.nome, so.pessoa_nome)   AS nome,
         coalesce(
@@ -205,7 +206,7 @@ export async function listar(
         ON m.id = so.membro_id
 
       LEFT JOIN legio.pessoa p
-        ON p.id = m.pessoa_id
+        ON p.id = coalesce(so.pessoa_id, m.pessoa_id)
 
       JOIN legio.unidade_legionaria ul
         ON ul.id = so.unidade_id
@@ -301,59 +302,67 @@ export async function resumo(): Promise<{
   };
 }
 
-/** Busca de membros para vincular como oficial. */
-export async function buscarMembros(
-  busca: string
-): Promise<Array<{
-  membroId: string;
+/** Busca pessoas cadastradas, independentemente do vínculo em legio.membro. */
+export async function buscarMembros(busca: string): Promise<Array<{
+  pessoaId: string;
+  membroId: string | null;
   nome: string;
   nomePreferido: string | null;
   cpf: string | null;
   email: string | null;
   celular: string | null;
+  telefone: string | null;
+  dataNascimento: string | null;
+  dtOrdenacaoPresbiteral: string | null;
+  municipioId: string | null;
+  subdivisaoLocalId: string | null;
+  cep: string | null;
+  logradouro: string | null;
+  numeroLogradouro: string | null;
+  complemento: string | null;
+  bairro: string | null;
+  localidade: string | null;
+  jaEhMembro: boolean;
   jaEhOficial: boolean;
 }>> {
-
   const termo = texto(busca);
-
-  if (!termo || termo.length < 3) {
-    return [];
-  }
+  if (!termo || termo.length < 3) return [];
 
   return sequelize.query(
     `
       SELECT
-        m.id::text                AS "membroId",
+        p.id::text AS "pessoaId",
+        m.id::text AS "membroId",
         p.nome,
-        p.nome_preferido          AS "nomePreferido",
-        p.cpf,
-        p.email,
-        p.celular,
+        p.nome_preferido AS "nomePreferido",
+        p.cpf, p.email, p.celular, p.telefone,
+        p.data_nascimento::text AS "dataNascimento",
+        p.dt_ordenacao_presbiteral::text AS "dtOrdenacaoPresbiteral",
+        p.id_municipio::text AS "municipioId",
+        p.subdivisao_local_id::text AS "subdivisaoLocalId",
+        p.cep, p.logradouro,
+        p.numero_logradouro AS "numeroLogradouro",
+        p.complemento, p.bairro, p.localidade,
+        (m.id IS NOT NULL) AS "jaEhMembro",
         EXISTS (
-          SELECT 1
-          FROM legio.membro_cargo_unidade mcu
-          WHERE mcu.membro_id = m.id
-            AND mcu.ativo = TRUE
-        )                         AS "jaEhOficial"
-
-      FROM legio.membro m
-      JOIN legio.pessoa p
-        ON p.id = m.pessoa_id
-
-      WHERE m.status = 'ATIVO'
-        AND (
-              p.nome ILIKE '%' || CAST(:termo AS varchar) || '%'
-              OR p.cpf ILIKE '%' || CAST(:termo AS varchar) || '%'
-              OR p.email ILIKE '%' || CAST(:termo AS varchar) || '%'
-            )
-
-      ORDER BY p.nome
-      LIMIT 20
+          SELECT 1 FROM legio.membro_cargo_unidade mcu
+          WHERE mcu.membro_id = m.id AND mcu.ativo = TRUE
+        ) AS "jaEhOficial"
+      FROM legio.pessoa p
+      LEFT JOIN LATERAL (
+        SELECT m1.id FROM legio.membro m1
+        WHERE m1.pessoa_id = p.id
+        ORDER BY (m1.status = 'ATIVO') DESC, m1.id
+        LIMIT 1
+      ) m ON TRUE
+      WHERE p.nome ILIKE '%' || CAST(:termo AS varchar) || '%'
+         OR p.nome_preferido ILIKE '%' || CAST(:termo AS varchar) || '%'
+         OR p.cpf ILIKE '%' || CAST(:termo AS varchar) || '%'
+         OR p.email ILIKE '%' || CAST(:termo AS varchar) || '%'
+      ORDER BY p.nome, p.id
+      LIMIT 30
     `,
-    {
-      replacements: { termo },
-      type: QueryTypes.SELECT
-    }
+    { replacements: { termo }, type: QueryTypes.SELECT }
   );
 }
 
@@ -467,39 +476,41 @@ export async function criar(
   }
 
   let membroId: string | null = null;
+  let pessoaId: string | null = null;
   let pessoaNome: string | null = null;
 
   if (origem === 'MEMBRO_EXISTENTE') {
-
-    membroId = texto(input.membroId);
-
-    if (!membroId || !/^\d+$/.test(membroId)) {
-      throw new HttpError(400, 'Selecione um membro valido.');
+    pessoaId = texto(input.pessoaId);
+    if (!pessoaId || !/^\d+$/.test(pessoaId)) {
+      throw new HttpError(400, 'Selecione uma pessoa cadastrada valida.');
     }
-
-    const membros = await sequelize.query<{ id: string }>(
-      `
-        SELECT id::text
-        FROM legio.membro
-        WHERE id = CAST(:membroId AS bigint)
-        LIMIT 1
-      `,
-      {
-        replacements: { membroId },
-        type: QueryTypes.SELECT
-      }
+    // A identidade vem do banco, não de um membroId fornecido pelo navegador.
+    const pessoas = await sequelize.query<{ id: string; membroId: string | null }>(
+      `SELECT p.id::text AS id,
+              (SELECT m.id::text FROM legio.membro m
+               WHERE m.pessoa_id = p.id
+               ORDER BY (m.status = 'ATIVO') DESC, m.id LIMIT 1) AS "membroId"
+         FROM legio.pessoa p
+        WHERE p.id = CAST(:pessoaId AS bigint) LIMIT 1`,
+      { replacements: { pessoaId }, type: QueryTypes.SELECT }
     );
-
-    if (membros.length === 0) {
-      throw new HttpError(404, 'Membro nao encontrado.');
-    }
-
+    if (pessoas.length === 0) throw new HttpError(404, 'Pessoa nao encontrada.');
+    membroId = pessoas[0].membroId;
   } else {
-
-    pessoaNome = texto(input.pessoaNome);
-
-    if (!pessoaNome) {
-      throw new HttpError(400, 'Informe o nome da pessoa.');
+    pessoaNome = texto(input.pessoaNome)?.toLocaleUpperCase('pt-BR') ?? null;
+    if (!pessoaNome) throw new HttpError(400, 'Informe o nome da pessoa.');
+    // CPF já cadastrado deve ser reaproveitado pelo fluxo de pessoa existente.
+    const cpfInformado = texto(input.pessoaCpf)?.replace(/\D/g, '') ?? '';
+    if (cpfInformado) {
+      const duplicadas = await sequelize.query<{ id: string }>(
+        `SELECT id::text FROM legio.pessoa
+          WHERE regexp_replace(coalesce(cpf, ''), '[^0-9]', '', 'g') = :cpf
+          LIMIT 1`,
+        { replacements: { cpf: cpfInformado }, type: QueryTypes.SELECT }
+      );
+      if (duplicadas.length) {
+        throw new HttpError(409, 'Pessoa ja cadastrada com este CPF. Utilize Pessoa ja cadastrada para evitar duplicidade.');
+      }
     }
   }
 
@@ -570,6 +581,7 @@ export async function criar(
       INSERT INTO legio.solicitacao_oficial
         (
           membro_id,
+          pessoa_id,
           pessoa_nome,
           pessoa_nome_preferido,
           pessoa_cpf,
@@ -604,6 +616,7 @@ export async function criar(
       VALUES
         (
           CAST(:membroId AS bigint),
+          CAST(:pessoaId AS bigint),
           :pessoaNome,
           :pessoaNomePreferido,
           :pessoaCpf,
@@ -640,8 +653,9 @@ export async function criar(
     {
       replacements: {
         membroId,
+        pessoaId,
         pessoaNome,
-        pessoaNomePreferido: texto(input.pessoaNomePreferido),
+        pessoaNomePreferido: texto(input.pessoaNomePreferido)?.toLocaleUpperCase('pt-BR') ?? null,
         pessoaCpf: texto(input.pessoaCpf),
         pessoaEmail: texto(input.pessoaEmail),
         pessoaCelular: texto(input.pessoaCelular),
@@ -710,6 +724,7 @@ export async function aprovar(
     const linhas = await sequelize.query<{
       id: string;
       membro_id: string | null;
+      pessoa_id: string | null;
       status: string;
       pessoa_nome: string | null;
       pessoa_nome_preferido: string | null;
@@ -744,6 +759,7 @@ export async function aprovar(
         SELECT
           id::text,
           membro_id::text,
+          pessoa_id::text,
           status,
           pessoa_nome,
           pessoa_nome_preferido,
@@ -798,9 +814,44 @@ export async function aprovar(
     }
 
     let membroId = solicitacao.membro_id;
+    let pessoaIdExistente = solicitacao.pessoa_id;
 
-    // Pessoa nova: cria pessoa e membro agora.
-    if (!membroId) {
+    // Busca membro sob trava de pessoa para impedir duplicação concorrente.
+    if (pessoaIdExistente) {
+      const pessoasBloqueadas = await sequelize.query<{ id: string }>(
+        `SELECT id::text FROM legio.pessoa
+         WHERE id = CAST(:pessoaId AS bigint) FOR UPDATE`,
+        { replacements: { pessoaId: pessoaIdExistente }, type: QueryTypes.SELECT, transaction }
+      );
+      if (!pessoasBloqueadas.length) throw new HttpError(404, 'Pessoa da solicitacao nao encontrada.');
+      const membrosExistentes = await sequelize.query<{ id: string; status: string }>(
+        `SELECT id::text, status FROM legio.membro
+         WHERE pessoa_id = CAST(:pessoaId AS bigint)
+         ORDER BY (status = 'ATIVO') DESC, id LIMIT 1`,
+        { replacements: { pessoaId: pessoaIdExistente }, type: QueryTypes.SELECT, transaction }
+      );
+      if (membrosExistentes.length) {
+        if (membrosExistentes[0].status !== 'ATIVO') {
+          throw new HttpError(409, 'Pessoa vinculada a membro inativo. Regularize o cadastro antes de aprovar.');
+        }
+        membroId = membrosExistentes[0].id;
+      }
+    }
+
+    // Só cria nova pessoa quando a solicitação realmente é de pessoa nova.
+    if (!membroId && !pessoaIdExistente) {
+      const cpfNovo = solicitacao.pessoa_cpf?.replace(/\D/g, '') ?? '';
+      if (cpfNovo) {
+        const existentes = await sequelize.query<{ id: string }>(
+          `SELECT id::text FROM legio.pessoa
+            WHERE regexp_replace(coalesce(cpf, ''), '[^0-9]', '', 'g') = :cpf
+            LIMIT 1`,
+          { replacements: { cpf: cpfNovo }, type: QueryTypes.SELECT, transaction }
+        );
+        if (existentes.length) {
+          throw new HttpError(409, 'Ja existe pessoa com este CPF. Regularize a solicitacao para reutilizar o cadastro existente.');
+        }
+      }
 
       const pessoas = await sequelize.query<{ id: string }>(
         `
@@ -813,7 +864,7 @@ export async function aprovar(
               email,
               celular,
               telefone,
-              dt_ordenacao_presbiterial, id_municipio, subdivisao_local_id,
+              dt_ordenacao_presbiteral, id_municipio, subdivisao_local_id,
               cep, logradouro, numero_logradouro, complemento, bairro, localidade
             )
           VALUES
@@ -854,8 +905,11 @@ export async function aprovar(
         }
       );
 
-      const pessoaId = pessoas[0].id;
+      pessoaIdExistente = pessoas[0].id;
+    }
 
+    if (!membroId) {
+      if (!pessoaIdExistente) throw new HttpError(500, 'Pessoa nao identificada na aprovacao.');
       const membros = await sequelize.query<{ id: string }>(
         `
           INSERT INTO legio.membro
@@ -886,7 +940,7 @@ export async function aprovar(
         `,
         {
           replacements: {
-            pessoaId,
+            pessoaId: pessoaIdExistente,
             dtIngresso: solicitacao.dt_ingresso,
             dtCompromisso: solicitacao.dt_compromisso,
             pretoriano: solicitacao.pretoriano,
@@ -913,7 +967,7 @@ export async function aprovar(
       if (!diretor[0] || !(/DIRETOR[_\s-]*ESPIRITUAL/i.test(diretor[0].codigo) || /DIRETOR\s+ESPIRITUAL/i.test(diretor[0].nome))) {
         throw new HttpError(422, 'Ordenacao presbiteral exclusiva do Diretor Espiritual.');
       }
-      await sequelize.query(`UPDATE legio.pessoa SET dt_ordenacao_presbiterial = CAST(:data AS date)
+      await sequelize.query(`UPDATE legio.pessoa SET dt_ordenacao_presbiteral = CAST(:data AS date)
         WHERE id = (SELECT pessoa_id FROM legio.membro WHERE id = CAST(:membroId AS bigint))`,
         { replacements: { data: solicitacao.pessoa_dt_ordenacao_presbiteral, membroId }, transaction });
     }
@@ -964,6 +1018,7 @@ export async function aprovar(
                  CAST(:analisadoPor AS bigint),
                analisado_em = CURRENT_TIMESTAMP,
                membro_id = CAST(:membroId AS bigint),
+               pessoa_id = (SELECT pessoa_id FROM legio.membro WHERE id = CAST(:membroId AS bigint)),
                updated_at = CURRENT_TIMESTAMP
          WHERE id = CAST(:id AS bigint)
       `,
