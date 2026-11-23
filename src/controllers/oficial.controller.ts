@@ -155,3 +155,23 @@ export async function unidadesAcessiveis(
     res.json(await unidadesPermitidas(exigirUsuario(req)));
   } catch (error) { next(error); }
 }
+
+/** GET /api/oficiais/tipos-unidades */
+export async function tiposUnidades(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+  try { exigirUsuario(req); res.json(await oficialService.listarTiposUnidades()); }
+  catch (error) { next(error); }
+}
+
+/** GET /api/oficiais/:id */
+export async function obter(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+  try { res.json(await oficialService.obter(exigirUsuario(req), String(req.params.id ?? ''))); }
+  catch (error) { next(error); }
+}
+
+/** PUT /api/oficiais/:id */
+export async function atualizar(req: AuthenticatedRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    await oficialService.atualizar(exigirUsuario(req), String(req.params.id ?? ''), req.body);
+    res.status(204).send();
+  } catch (error) { next(error); }
+}

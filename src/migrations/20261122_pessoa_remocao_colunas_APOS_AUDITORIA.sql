@@ -1,0 +1,7 @@
+-- ETAPA 2 - EXECUTAR SOMENTE APÓS AUDITORIA das views, funções, triggers e SQL do aplicativo
+-- Antes: migrar valores legados para id_municipio (não há equivalência automática garantida)
+-- Consulta de dependências no banco é obrigatória, e backup também.
+-- Arquivo propositalmente não executável para evitar perda acidental.
+-- ALTER TABLE legio.pessoa DROP COLUMN cidade;
+-- ALTER TABLE legio.pessoa DROP COLUMN estado_regiao;
+-- ALTER TABLE legio.pessoa DROP COLUMN pais_codigo;

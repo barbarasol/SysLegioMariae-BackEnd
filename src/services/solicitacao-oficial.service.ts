@@ -56,6 +56,15 @@ export type CriarSolicitacaoInput = {
   pessoaEmail?: string | null;
   pessoaCelular?: string | null;
   pessoaTelefone?: string | null;
+  pessoaDtOrdenacaoPresbiteral?: string | null;
+  pessoaMunicipioId?: string | null;
+  pessoaSubdivisaoLocalId?: string | null;
+  pessoaCep?: string | null;
+  pessoaLogradouro?: string | null;
+  pessoaNumeroLogradouro?: string | null;
+  pessoaComplemento?: string | null;
+  pessoaBairro?: string | null;
+  pessoaLocalidade?: string | null;
 
   dtIngresso?: string | null;
   dtCompromisso?: string | null;
@@ -534,6 +543,28 @@ export async function criar(
     );
   }
 
+  const cargoDados = await sequelize.query<{ codigo: string; nome: string }>(
+    `SELECT codigo, nome FROM legio.cargo_legionario WHERE id = :cargoId LIMIT 1`,
+    { replacements: { cargoId }, type: QueryTypes.SELECT }
+  );
+  const cargo = cargoDados[0];
+  const diretorEspiritual = Boolean(cargo && (
+    /DIRETOR[_\s-]*ESPIRITUAL/i.test(cargo.codigo) ||
+    /DIRETOR\s+ESPIRITUAL/i.test(cargo.nome)
+  ));
+  const dataOrdenacao = data(input.pessoaDtOrdenacaoPresbiteral, 'data de ordenacao presbiteral');
+  if (dataOrdenacao && !diretorEspiritual) {
+    throw new HttpError(422, 'Data de ordenacao presbiteral e exclusiva do Diretor Espiritual.');
+  }
+  if (origem === 'PESSOA_NOVA' && input.pessoaSubdivisaoLocalId && !input.pessoaMunicipioId) {
+    throw new HttpError(422, 'Informe o municipio para a subdivisao local.');
+  }
+  for (const [campo, valor] of [
+    ['municipio', input.pessoaMunicipioId], ['subdivisao local', input.pessoaSubdivisaoLocalId]
+  ] as const) {
+    if (valor && !/^\d+$/.test(valor)) throw new HttpError(422, `Identificador invalido: ${campo}.`);
+  }
+
   const inseridas = await sequelize.query<{ id: string }>(
     `
       INSERT INTO legio.solicitacao_oficial
@@ -546,6 +577,15 @@ export async function criar(
           pessoa_email,
           pessoa_celular,
           pessoa_telefone,
+          pessoa_dt_ordenacao_presbiteral,
+          pessoa_id_municipio,
+          pessoa_subdivisao_local_id,
+          pessoa_cep,
+          pessoa_logradouro,
+          pessoa_numero_logradouro,
+          pessoa_complemento,
+          pessoa_bairro,
+          pessoa_localidade,
           unidade_id,
           cargo_id,
           numero_mandato,
@@ -571,6 +611,15 @@ export async function criar(
           :pessoaEmail,
           :pessoaCelular,
           :pessoaTelefone,
+          CAST(:pessoaDtOrdenacaoPresbiteral AS date),
+          CAST(:pessoaMunicipioId AS integer),
+          CAST(:pessoaSubdivisaoLocalId AS bigint),
+          :pessoaCep,
+          :pessoaLogradouro,
+          :pessoaNumeroLogradouro,
+          :pessoaComplemento,
+          :pessoaBairro,
+          :pessoaLocalidade,
           CAST(:unidadeId AS bigint),
           :cargoId,
           :numeroMandato,
@@ -597,6 +646,15 @@ export async function criar(
         pessoaEmail: texto(input.pessoaEmail),
         pessoaCelular: texto(input.pessoaCelular),
         pessoaTelefone: texto(input.pessoaTelefone),
+        pessoaDtOrdenacaoPresbiteral: dataOrdenacao,
+        pessoaMunicipioId: texto(input.pessoaMunicipioId),
+        pessoaSubdivisaoLocalId: texto(input.pessoaSubdivisaoLocalId),
+        pessoaCep: texto(input.pessoaCep),
+        pessoaLogradouro: texto(input.pessoaLogradouro),
+        pessoaNumeroLogradouro: texto(input.pessoaNumeroLogradouro),
+        pessoaComplemento: texto(input.pessoaComplemento),
+        pessoaBairro: texto(input.pessoaBairro),
+        pessoaLocalidade: texto(input.pessoaLocalidade),
         nascimento,
         unidadeId,
         cargoId,
@@ -660,6 +718,15 @@ export async function aprovar(
       pessoa_email: string | null;
       pessoa_celular: string | null;
       pessoa_telefone: string | null;
+      pessoa_dt_ordenacao_presbiteral: string | null;
+      pessoa_id_municipio: string | null;
+      pessoa_subdivisao_local_id: string | null;
+      pessoa_cep: string | null;
+      pessoa_logradouro: string | null;
+      pessoa_numero_logradouro: string | null;
+      pessoa_complemento: string | null;
+      pessoa_bairro: string | null;
+      pessoa_localidade: string | null;
       unidade_id: string;
       cargo_id: number;
       numero_mandato: number | null;
@@ -685,6 +752,15 @@ export async function aprovar(
           pessoa_email,
           pessoa_celular,
           pessoa_telefone,
+          pessoa_dt_ordenacao_presbiteral::text,
+          pessoa_id_municipio::text,
+          pessoa_subdivisao_local_id::text,
+          pessoa_cep,
+          pessoa_logradouro,
+          pessoa_numero_logradouro,
+          pessoa_complemento,
+          pessoa_bairro,
+          pessoa_localidade,
           unidade_id::text,
           cargo_id,
           numero_mandato,
@@ -736,7 +812,9 @@ export async function aprovar(
               data_nascimento,
               email,
               celular,
-              telefone
+              telefone,
+              dt_ordenacao_presbiterial, id_municipio, subdivisao_local_id,
+              cep, logradouro, numero_logradouro, complemento, bairro, localidade
             )
           VALUES
             (
@@ -746,7 +824,9 @@ export async function aprovar(
               CAST(:nascimento AS date),
               :email,
               :celular,
-              :telefone
+              :telefone,
+              CAST(:ordenacao AS date), CAST(:municipio AS integer), CAST(:subdivisao AS bigint),
+              :cep, :logradouro, :numero, :complemento, :bairro, :localidade
             )
           RETURNING id::text
         `,
@@ -758,7 +838,16 @@ export async function aprovar(
             nascimento: solicitacao.pessoa_data_nascimento,
             email: solicitacao.pessoa_email,
             celular: solicitacao.pessoa_celular,
-            telefone: solicitacao.pessoa_telefone
+            telefone: solicitacao.pessoa_telefone,
+            ordenacao: solicitacao.pessoa_dt_ordenacao_presbiteral,
+            municipio: solicitacao.pessoa_id_municipio,
+            subdivisao: solicitacao.pessoa_subdivisao_local_id,
+            cep: solicitacao.pessoa_cep,
+            logradouro: solicitacao.pessoa_logradouro,
+            numero: solicitacao.pessoa_numero_logradouro,
+            complemento: solicitacao.pessoa_complemento,
+            bairro: solicitacao.pessoa_bairro,
+            localidade: solicitacao.pessoa_localidade,
           },
           type: QueryTypes.SELECT,
           transaction
@@ -812,6 +901,21 @@ export async function aprovar(
       );
 
       membroId = membros[0].id;
+    }
+
+    // Para um membro existente, a ordenacao pertence a pessoa e nao ao mandato.
+    // A atualizacao ocorre somente quando uma data foi informada na proposta.
+    if (membroId && solicitacao.pessoa_dt_ordenacao_presbiteral) {
+      const diretor = await sequelize.query<{ codigo: string; nome: string }>(
+        `SELECT codigo, nome FROM legio.cargo_legionario WHERE id = :cargoId`,
+        { replacements: { cargoId: solicitacao.cargo_id }, type: QueryTypes.SELECT, transaction }
+      );
+      if (!diretor[0] || !(/DIRETOR[_\s-]*ESPIRITUAL/i.test(diretor[0].codigo) || /DIRETOR\s+ESPIRITUAL/i.test(diretor[0].nome))) {
+        throw new HttpError(422, 'Ordenacao presbiteral exclusiva do Diretor Espiritual.');
+      }
+      await sequelize.query(`UPDATE legio.pessoa SET dt_ordenacao_presbiterial = CAST(:data AS date)
+        WHERE id = (SELECT pessoa_id FROM legio.membro WHERE id = CAST(:membroId AS bigint))`,
+        { replacements: { data: solicitacao.pessoa_dt_ordenacao_presbiteral, membroId }, transaction });
     }
 
     // Vinculo de oficial.

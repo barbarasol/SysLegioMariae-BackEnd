@@ -5,7 +5,10 @@ import {
   encerrar,
   listar,
   resumo,
-  unidadesAcessiveis
+  unidadesAcessiveis,
+  tiposUnidades,
+  obter,
+  atualizar
 } from '../controllers/oficial.controller.js';
 import {
   authMiddleware
@@ -24,6 +27,9 @@ router.get('/resumo', resumo);
 router.get('/cargos', cargos);
 
 router.get('/unidades-acessiveis', unidadesAcessiveis);
+router.get('/tipos-unidades', tiposUnidades);
+router.get('/:id', obter);
+router.put('/:id', atualizar);
 
 router.delete('/:id', encerrar);
 

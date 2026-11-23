@@ -513,3 +513,114 @@ export async function encerrar(
     }
   );
 }
+
+export type AtualizarOficialInput = {
+  nome: string;
+  nomePreferido?: string | null;
+  email?: string | null;
+  celular?: string | null;
+  telefone?: string | null;
+  dataNascimento?: string | null;
+  unidadeId: string;
+  cargo: string;
+  numeroMandato?: number | null;
+  dataInicio: string;
+  dataFim?: string | null;
+};
+
+function validarData(valor: unknown, obrigatoria = false): string | null {
+  const v = texto(valor);
+  if (!v) {
+    if (obrigatoria) throw new HttpError(400, 'Informe a data de início.');
+    return null;
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(v)) throw new HttpError(400, 'Data inválida.');
+  const [a, m, d] = v.split('-').map(Number);
+  const data = new Date(Date.UTC(a,m-1,d));
+  if (data.getUTCFullYear() !== a || data.getUTCMonth() !== m-1 || data.getUTCDate() !== d)
+    throw new HttpError(400, 'Data inexistente.');
+  return v;
+}
+
+/** Leitura com escopo + verificação de permissão administrativa. */
+export async function obter(usuarioId: string, vinculoId: string): Promise<OficialListado & { podeEditar: boolean }> {
+  if (!/^\d+$/.test(vinculoId)) throw new HttpError(400, 'Oficial inválido.');
+  const lista = await listar(usuarioId);
+  const oficial = lista.find(o => o.id === vinculoId);
+  if (!oficial) throw new HttpError(404, 'Oficial não encontrado no seu escopo.');
+  const unidades = await unidadesPermitidas(usuarioId);
+  return { ...oficial, podeEditar: unidades.some(u => u.id === oficial.unidadeId && u.podeEditar) };
+}
+
+/** Edita o vínculo e os dados pessoais autorizados, sem alterar CPF ou RG. */
+export async function atualizar(
+  usuarioId: string, vinculoId: string, input: AtualizarOficialInput
+): Promise<void> {
+  if (!/^\d+$/.test(vinculoId)) throw new HttpError(400, 'Oficial inválido.');
+  if (!input || typeof input !== 'object') throw new HttpError(400, 'Dados inválidos.');
+  const nome = texto(input.nome);
+  const unidadeId = texto(input.unidadeId);
+  const cargo = texto(input.cargo)?.toUpperCase() ?? null;
+  const inicio = validarData(input.dataInicio, true);
+  const fim = validarData(input.dataFim);
+  const numero = input.numeroMandato === null || input.numeroMandato === undefined
+    ? null : Number(input.numeroMandato);
+  const email = texto(input.email)?.toLowerCase() ?? null;
+  if (!nome || nome.length > 255) throw new HttpError(400, 'Informe um nome válido.');
+  if (!unidadeId || !/^\d+$/.test(unidadeId)) throw new HttpError(400, 'Unidade inválida.');
+  if (!cargo) throw new HttpError(400, 'Informe o cargo.');
+  if (email && (email.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)))
+    throw new HttpError(400, 'E-mail inválido.');
+  if (numero !== null && (!Number.isSafeInteger(numero) || numero < 1 || numero > 100))
+    throw new HttpError(400, 'Número do mandato inválido.');
+  if (fim && inicio && fim < inicio) throw new HttpError(400, 'Data final anterior à inicial.');
+
+  await sequelize.transaction(async transaction => {
+    const vinculos = await sequelize.query<{ pessoa_id: string; unidade_id: string }>(`
+      SELECT p.id::text AS pessoa_id, mcu.unidade_id::text AS unidade_id
+      FROM legio.membro_cargo_unidade mcu
+      JOIN legio.membro m ON m.id = mcu.membro_id
+      JOIN legio.pessoa p ON p.id = m.pessoa_id
+      WHERE mcu.id = CAST(:vinculoId AS bigint) AND mcu.ativo = TRUE
+      FOR UPDATE OF mcu
+    `, { replacements: { vinculoId }, transaction, type: QueryTypes.SELECT });
+    const vinculo = vinculos[0];
+    if (!vinculo) throw new HttpError(404, 'Vínculo ativo não encontrado.');
+    await exigirUnidadePermitida(usuarioId, vinculo.unidade_id, 'EDITAR', transaction);
+    await exigirUnidadePermitida(usuarioId, unidadeId, 'EDITAR', transaction);
+    const cargos = await sequelize.query<{ id: number }>(`
+      SELECT id FROM legio.cargo_legionario
+      WHERE codigo = :cargo AND ativo = TRUE AND eh_oficial = TRUE LIMIT 1
+    `, { replacements: { cargo }, transaction, type: QueryTypes.SELECT });
+    if (!cargos[0]) throw new HttpError(400, 'Cargo de oficial inválido.');
+    await sequelize.query(`
+      UPDATE legio.pessoa SET nome = :nome, nome_preferido = :nomePreferido,
+        email = :email, celular = :celular, telefone = :telefone,
+        data_nascimento = CAST(:nascimento AS date)
+      WHERE id = CAST(:pessoaId AS bigint)
+    `, { replacements: {
+      pessoaId: vinculo.pessoa_id, nome,
+      nomePreferido: texto(input.nomePreferido), email,
+      celular: texto(input.celular), telefone: texto(input.telefone),
+      nascimento: validarData(input.dataNascimento)
+    }, transaction });
+    await sequelize.query(`
+      UPDATE legio.membro_cargo_unidade SET
+        unidade_id = CAST(:unidadeId AS bigint), cargo_id = :cargoId,
+        numero_mandato = :numero, data_inicio = CAST(:inicio AS date),
+        data_fim = CAST(:fim AS date), updated_at = CURRENT_TIMESTAMP
+      WHERE id = CAST(:vinculoId AS bigint) AND ativo = TRUE
+    `, { replacements: {
+      vinculoId, unidadeId, cargoId: cargos[0].id,
+      numero, inicio, fim
+    }, transaction });
+  });
+}
+
+/** Tipos cadastrados, sem depender de haver oficiais ou unidades subordinadas. */
+export async function listarTiposUnidades(): Promise<Array<{ codigo: string; nome: string }>> {
+  return sequelize.query<{ codigo: string; nome: string }>(`
+    SELECT codigo, nome FROM legio.tipo_unidade
+    ORDER BY ordem_hierarquica NULLS LAST, nome
+  `, { type: QueryTypes.SELECT });
+}
