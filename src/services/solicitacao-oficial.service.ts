@@ -315,6 +315,8 @@ export async function buscarMembros(busca: string): Promise<Array<{
   dataNascimento: string | null;
   dtOrdenacaoPresbiteral: string | null;
   municipioId: string | null;
+  ufId: string | null;
+  paisId: string | null;
   subdivisaoLocalId: string | null;
   cep: string | null;
   logradouro: string | null;
@@ -339,6 +341,8 @@ export async function buscarMembros(busca: string): Promise<Array<{
         p.data_nascimento::text AS "dataNascimento",
         p.dt_ordenacao_presbiteral::text AS "dtOrdenacaoPresbiteral",
         p.id_municipio::text AS "municipioId",
+        uf.id::text AS "ufId",
+        pais.id::text AS "paisId",
         p.subdivisao_local_id::text AS "subdivisaoLocalId",
         p.cep, p.logradouro,
         p.numero_logradouro AS "numeroLogradouro",
@@ -349,6 +353,9 @@ export async function buscarMembros(busca: string): Promise<Array<{
           WHERE mcu.membro_id = m.id AND mcu.ativo = TRUE
         ) AS "jaEhOficial"
       FROM legio.pessoa p
+      LEFT JOIN legio.municipio municipio ON municipio.id = p.id_municipio
+      LEFT JOIN legio.uf uf ON uf.id = municipio.id_uf
+      LEFT JOIN legio.pais pais ON pais.id = uf.id_pais
       LEFT JOIN LATERAL (
         SELECT m1.id FROM legio.membro m1
         WHERE m1.pessoa_id = p.id
@@ -479,23 +486,61 @@ export async function criar(
   let pessoaId: string | null = null;
   let pessoaNome: string | null = null;
 
+  // Na origem MEMBRO_EXISTENTE, o cadastro de pessoa pode existir sem
+  // legio.membro. Use os dados do banco como fotografia da solicitação,
+  // sem confiar em dados pessoais enviados novamente pelo navegador.
+  type PessoaExistente = {
+    id: string;
+    membroId: string | null;
+    nome: string;
+    nomePreferido: string | null;
+    cpf: string | null;
+    nascimento: string | null;
+    email: string | null;
+    celular: string | null;
+    telefone: string | null;
+    ordenacao: string | null;
+    municipioId: string | null;
+    subdivisaoLocalId: string | null;
+    cep: string | null;
+    logradouro: string | null;
+    numeroLogradouro: string | null;
+    complemento: string | null;
+    bairro: string | null;
+    localidade: string | null;
+  };
+  let pessoaExistente: PessoaExistente | null = null;
+
   if (origem === 'MEMBRO_EXISTENTE') {
     pessoaId = texto(input.pessoaId);
     if (!pessoaId || !/^\d+$/.test(pessoaId)) {
       throw new HttpError(400, 'Selecione uma pessoa cadastrada valida.');
     }
-    // A identidade vem do banco, não de um membroId fornecido pelo navegador.
-    const pessoas = await sequelize.query<{ id: string; membroId: string | null }>(
+    const pessoas = await sequelize.query<PessoaExistente>(
       `SELECT p.id::text AS id,
               (SELECT m.id::text FROM legio.membro m
                WHERE m.pessoa_id = p.id
-               ORDER BY (m.status = 'ATIVO') DESC, m.id LIMIT 1) AS "membroId"
+               ORDER BY (m.status = 'ATIVO') DESC, m.id LIMIT 1) AS "membroId",
+              p.nome,
+              p.nome_preferido AS "nomePreferido",
+              p.cpf,
+              p.data_nascimento::text AS nascimento,
+              p.email, p.celular, p.telefone,
+              p.dt_ordenacao_presbiteral::text AS ordenacao,
+              p.id_municipio::text AS "municipioId",
+              p.subdivisao_local_id::text AS "subdivisaoLocalId",
+              p.cep, p.logradouro,
+              p.numero_logradouro AS "numeroLogradouro",
+              p.complemento, p.bairro, p.localidade
          FROM legio.pessoa p
         WHERE p.id = CAST(:pessoaId AS bigint) LIMIT 1`,
       { replacements: { pessoaId }, type: QueryTypes.SELECT }
     );
     if (pessoas.length === 0) throw new HttpError(404, 'Pessoa nao encontrada.');
-    membroId = pessoas[0].membroId;
+    pessoaExistente = pessoas[0];
+    membroId = pessoaExistente.membroId;
+    pessoaNome = texto(pessoaExistente.nome)?.toLocaleUpperCase('pt-BR') ?? null;
+    if (!pessoaNome) throw new HttpError(422, 'A pessoa cadastrada está sem nome. Corrija o cadastro antes de solicitar.');
   } else {
     pessoaNome = texto(input.pessoaNome)?.toLocaleUpperCase('pt-BR') ?? null;
     if (!pessoaNome) throw new HttpError(400, 'Informe o nome da pessoa.');
@@ -567,7 +612,7 @@ export async function criar(
   if (dataOrdenacao && !diretorEspiritual) {
     throw new HttpError(422, 'Data de ordenacao presbiteral e exclusiva do Diretor Espiritual.');
   }
-  if (origem === 'PESSOA_NOVA' && input.pessoaSubdivisaoLocalId && !input.pessoaMunicipioId) {
+  if (input.pessoaSubdivisaoLocalId && !(texto(input.pessoaMunicipioId) || pessoaExistente?.municipioId)) {
     throw new HttpError(422, 'Informe o municipio para a subdivisao local.');
   }
   for (const [campo, valor] of [
@@ -655,21 +700,21 @@ export async function criar(
         membroId,
         pessoaId,
         pessoaNome,
-        pessoaNomePreferido: texto(input.pessoaNomePreferido)?.toLocaleUpperCase('pt-BR') ?? null,
-        pessoaCpf: texto(input.pessoaCpf),
-        pessoaEmail: texto(input.pessoaEmail),
-        pessoaCelular: texto(input.pessoaCelular),
-        pessoaTelefone: texto(input.pessoaTelefone),
-        pessoaDtOrdenacaoPresbiteral: dataOrdenacao,
-        pessoaMunicipioId: texto(input.pessoaMunicipioId),
-        pessoaSubdivisaoLocalId: texto(input.pessoaSubdivisaoLocalId),
-        pessoaCep: texto(input.pessoaCep),
-        pessoaLogradouro: texto(input.pessoaLogradouro),
-        pessoaNumeroLogradouro: texto(input.pessoaNumeroLogradouro),
-        pessoaComplemento: texto(input.pessoaComplemento),
-        pessoaBairro: texto(input.pessoaBairro),
-        pessoaLocalidade: texto(input.pessoaLocalidade),
-        nascimento,
+        pessoaNomePreferido: (pessoaExistente ? texto(pessoaExistente.nomePreferido) : texto(input.pessoaNomePreferido))?.toLocaleUpperCase('pt-BR') ?? null,
+        pessoaCpf: pessoaExistente ? texto(pessoaExistente.cpf) : texto(input.pessoaCpf),
+        pessoaEmail: pessoaExistente ? texto(pessoaExistente.email) : texto(input.pessoaEmail),
+        pessoaCelular: pessoaExistente ? texto(pessoaExistente.celular) : texto(input.pessoaCelular),
+        pessoaTelefone: pessoaExistente ? texto(pessoaExistente.telefone) : texto(input.pessoaTelefone),
+        pessoaDtOrdenacaoPresbiteral: dataOrdenacao ?? (diretorEspiritual ? pessoaExistente?.ordenacao ?? null : null),
+        pessoaMunicipioId: texto(input.pessoaMunicipioId) ?? (pessoaExistente ? texto(pessoaExistente.municipioId) : null),
+        pessoaSubdivisaoLocalId: texto(input.pessoaSubdivisaoLocalId) ?? (pessoaExistente ? texto(pessoaExistente.subdivisaoLocalId) : null),
+        pessoaCep: texto(input.pessoaCep) ?? (pessoaExistente ? texto(pessoaExistente.cep) : null),
+        pessoaLogradouro: texto(input.pessoaLogradouro) ?? (pessoaExistente ? texto(pessoaExistente.logradouro) : null),
+        pessoaNumeroLogradouro: texto(input.pessoaNumeroLogradouro) ?? (pessoaExistente ? texto(pessoaExistente.numeroLogradouro) : null),
+        pessoaComplemento: texto(input.pessoaComplemento) ?? (pessoaExistente ? texto(pessoaExistente.complemento) : null),
+        pessoaBairro: texto(input.pessoaBairro) ?? (pessoaExistente ? texto(pessoaExistente.bairro) : null),
+        pessoaLocalidade: texto(input.pessoaLocalidade) ?? (pessoaExistente ? texto(pessoaExistente.localidade) : null),
+        nascimento: pessoaExistente?.nascimento ?? nascimento,
         unidadeId,
         cargoId,
         numeroMandato,
@@ -906,6 +951,37 @@ export async function aprovar(
       );
 
       pessoaIdExistente = pessoas[0].id;
+    }
+
+    // Pessoa previamente cadastrada: o endereço proposto só é aplicado
+    // depois da aprovação. NULL na solicitação não apaga valores existentes.
+    if (solicitacao.pessoa_id && pessoaIdExistente) {
+      await sequelize.query(
+        `UPDATE legio.pessoa SET
+           id_municipio = COALESCE(CAST(:municipio AS integer), id_municipio),
+           subdivisao_local_id = COALESCE(CAST(:subdivisao AS bigint), subdivisao_local_id),
+           cep = COALESCE(:cep, cep),
+           logradouro = COALESCE(:logradouro, logradouro),
+           numero_logradouro = COALESCE(:numero, numero_logradouro),
+           complemento = COALESCE(:complemento, complemento),
+           bairro = COALESCE(:bairro, bairro),
+           localidade = COALESCE(:localidade, localidade)
+         WHERE id = CAST(:pessoaId AS bigint)`,
+        {
+          replacements: {
+            pessoaId: pessoaIdExistente,
+            municipio: texto(solicitacao.pessoa_id_municipio),
+            subdivisao: texto(solicitacao.pessoa_subdivisao_local_id),
+            cep: texto(solicitacao.pessoa_cep),
+            logradouro: texto(solicitacao.pessoa_logradouro),
+            numero: texto(solicitacao.pessoa_numero_logradouro),
+            complemento: texto(solicitacao.pessoa_complemento),
+            bairro: texto(solicitacao.pessoa_bairro),
+            localidade: texto(solicitacao.pessoa_localidade)
+          },
+          transaction
+        }
+      );
     }
 
     if (!membroId) {
