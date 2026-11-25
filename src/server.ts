@@ -19,6 +19,7 @@ import unidadeInstitucionalRouter from './routes/unidade-institucional.routes.js
 import igrejaEdicaoRouter from './routes/igreja-edicao.routes.js';
 import controleVersaoRouter from './routes/controle-versao.routes.js';
 import mapaMundialRoutes from './routes/mapa-mundial.routes.js';
+import tesourariaRoutes from './routes/tesouraria.routes.js';
 
 
 dotenv.config();
@@ -94,6 +95,7 @@ app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/unidade-visitas', unidadeVisitasRouter);
 app.use('/api/unidade-institucional', unidadeInstitucionalRouter);
 app.use('/api/mapa-mundial', mapaMundialRoutes);
+app.use('/api/tesouraria', tesourariaRoutes);
 
 app.use(
   errorMiddleware
